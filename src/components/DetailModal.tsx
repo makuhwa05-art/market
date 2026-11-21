@@ -1,5 +1,16 @@
 import { useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, MapPin, MessageCircle, Pencil, User, X } from 'lucide-react';
+import {
+  BadgeCheck,
+  ChevronLeft,
+  ChevronRight,
+  Flag,
+  MapPin,
+  MessageCircle,
+  Pencil,
+  User,
+  X,
+} from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import type { HouseListing, JobListing, MarketListing } from '../types';
 import {
   buildHouseWhatsAppMessage,
@@ -18,30 +29,53 @@ export type DetailSelection =
 
 interface DetailModalProps {
   selection: DetailSelection | null;
-  currentUserId: string | null;
+  currentUserId: number | null;
   onClose: () => void;
   onEdit: (selection: DetailSelection) => void;
 }
 
+const REPORT_REASONS = [
+  'Suspected scam or fake ad',
+  'Wrong price or misleading details',
+  'Item/job/house already taken',
+  'Inappropriate or offensive content',
+] as const;
+
 export function DetailModal({ selection, currentUserId, onClose, onEdit }: DetailModalProps) {
+  const { authHeaders } = useAuth();
   const [photoIndex, setPhotoIndex] = useState(0);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportReason, setReportReason] = useState<string>(REPORT_REASONS[0]);
+  const [reportDetails, setReportDetails] = useState('');
+  const [reporting, setReporting] = useState(false);
+  const [reportSent, setReportSent] = useState(false);
+  const [reportError, setReportError] = useState('');
 
   useEffect(() => {
     setPhotoIndex(0);
+    setReportOpen(false);
+    setReportSent(false);
+    setReportDetails('');
+    setReportError('');
   }, [selection]);
 
   if (!selection) return null;
 
   const isOwner = currentUserId !== null && selection.item.userId === currentUserId;
-  const photos =
-    selection.type === 'job' ? [] : selection.item.photos;
+  const photos = selection.type === 'job' ? [] : selection.item.photos;
   const activePhoto = photos[photoIndex] ?? photos[0];
+  const lifecycle = selection.item.lifecycleStatus ?? 'active';
+  const isClosed =
+    lifecycle === 'filled' ||
+    lifecycle === 'sold' ||
+    lifecycle === 'rented' ||
+    lifecycle === 'expired';
 
   let waHref = '#';
   let waLabel = 'CONTACT ON WHATSAPP';
   if (selection.type === 'job') {
     const j = selection.item;
-    waHref = buildWhatsAppUrl(j.whatsapp, buildJobWhatsAppMessage(j.title, j.company, j.location));
+    waHref = buildWhatsAppUrl(j.whatsapp, buildJobWhatsAppMessage(j.title, j.employer, j.location));
     waLabel = 'APPLY ON WHATSAPP';
   } else if (selection.type === 'market') {
     const m = selection.item;
@@ -56,8 +90,40 @@ export function DetailModal({ selection, currentUserId, onClose, onEdit }: Detai
       h.whatsapp,
       buildHouseWhatsAppMessage(h.title, h.suburb, h.city, h.price)
     );
-    waLabel = 'CONTACT ON WHATSAPP';
+    waLabel = 'CONTACT LANDLORD ON WHATSAPP';
   }
+
+  const handleSubmitReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setReporting(true);
+    setReportError('');
+    try {
+      const res = await fetch('/api/reports', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+        },
+        body: JSON.stringify({
+          listingType: selection.type,
+          listingId: selection.item.id,
+          reason: reportReason,
+          details: reportDetails.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setReportError(data.error || 'Could not submit report.');
+        return;
+      }
+      setReportSent(true);
+      setReportOpen(false);
+    } catch {
+      setReportError('Network error submitting report.');
+    } finally {
+      setReporting(false);
+    }
+  };
 
   return (
     <div
@@ -71,13 +137,20 @@ export function DetailModal({ selection, currentUserId, onClose, onEdit }: Detai
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 border-b border-slate-200">
-          <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-            {selection.type === 'job'
-              ? 'Job Details'
-              : selection.type === 'market'
-                ? 'Market Listing'
-                : 'Property Rental'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+              {selection.type === 'job'
+                ? 'Job Details'
+                : selection.type === 'market'
+                  ? 'Market Listing'
+                  : 'Property Rental'}
+            </span>
+            {selection.item.isSponsored && (
+              <span className="text-[11px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-200">
+                SPONSORED
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             {isOwner && (
               <button
@@ -144,7 +217,9 @@ export function DetailModal({ selection, currentUserId, onClose, onEdit }: Detai
                   </span>
                 )}
               </div>
-              <p className="text-sm font-medium text-slate-700">{selection.item.company}</p>
+              <p className="text-sm font-medium text-slate-700">
+                {selection.item.employer} · {selection.item.employmentType}
+              </p>
               <p className="text-xs text-slate-500 flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5" aria-hidden="true" />
                 {selection.item.location} · {selection.item.category} · {formatTimeAgo(selection.item.createdAt)}
@@ -231,27 +306,100 @@ export function DetailModal({ selection, currentUserId, onClose, onEdit }: Detai
             </div>
           )}
 
-          <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+          <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
             <span className="inline-flex items-center gap-1.5">
               <User className="w-3.5 h-3.5" aria-hidden="true" />
               Posted by <strong className="font-semibold text-slate-700">{selection.item.authorName}</strong>
+              {selection.item.isVerified && (
+                <span className="inline-flex items-center gap-0.5 text-emerald-700 font-semibold">
+                  <BadgeCheck className="w-3.5 h-3.5" aria-hidden="true" />
+                  Verified
+                </span>
+              )}
             </span>
             <span className="tabular-nums font-medium text-slate-700">
               {formatZimbabwePhoneDisplay(selection.item.whatsapp)}
             </span>
           </div>
+
+          {!isOwner && (
+            <div className="pt-2">
+              {reportSent ? (
+                <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                  Thank you. Your report has been sent to the administrator for review.
+                </p>
+              ) : reportOpen ? (
+                <form
+                  onSubmit={handleSubmitReport}
+                  className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-800">Report Suspicious Ad</span>
+                    <button
+                      type="button"
+                      onClick={() => setReportOpen(false)}
+                      className="text-xs text-slate-500 hover:text-slate-800"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {reportError && <p className="text-xs text-red-700">{reportError}</p>}
+                  <select
+                    value={reportReason}
+                    onChange={(e) => setReportReason(e.target.value)}
+                    className="w-full min-h-[40px] px-3 rounded-lg border border-slate-300 bg-white text-xs text-slate-900"
+                  >
+                    {REPORT_REASONS.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    value={reportDetails}
+                    onChange={(e) => setReportDetails(e.target.value)}
+                    placeholder="Optional extra details..."
+                    className="w-full min-h-[40px] px-3 rounded-lg border border-slate-300 bg-white text-xs text-slate-900"
+                  />
+                  <button
+                    type="submit"
+                    disabled={reporting}
+                    className="w-full min-h-[40px] rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold disabled:opacity-60"
+                  >
+                    {reporting ? 'Submitting...' : 'Submit Report'}
+                  </button>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setReportOpen(true)}
+                  className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-red-600 transition-colors"
+                >
+                  <Flag className="w-3.5 h-3.5" aria-hidden="true" />
+                  Report suspicious listing
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="p-4 sm:px-6 border-t border-slate-200 bg-white pb-safe">
-          <a
-            href={waHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-full min-h-[48px] px-5 inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold tracking-wide transition-colors"
-          >
-            <MessageCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
-            {waLabel}
-          </a>
+          {isClosed ? (
+            <span className="w-full min-h-[48px] px-5 inline-flex items-center justify-center rounded-xl bg-slate-100 text-slate-500 text-sm font-semibold tracking-wide">
+              LISTING MARKED {lifecycle.toUpperCase()}
+            </span>
+          ) : (
+            <a
+              href={waHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full min-h-[48px] px-5 inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold tracking-wide transition-colors"
+            >
+              <MessageCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+              {waLabel}
+            </a>
+          )}
         </div>
       </div>
     </div>

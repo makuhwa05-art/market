@@ -38,6 +38,7 @@ export function isValidZimbabwePhone(input: string): boolean {
 }
 
 export function formatZimbabwePhoneDisplay(phone: string): string {
+  if (!phone) return 'Not set';
   const normalized = normalizeZimbabwePhone(phone);
   if (normalized.startsWith('+263') && normalized.length === 13) {
     return `+263 ${normalized.slice(4, 6)} ${normalized.slice(6, 9)} ${normalized.slice(9)}`;
@@ -51,8 +52,8 @@ export function buildWhatsAppUrl(phone: string, message: string): string {
   return `https://wa.me/${digitsOnly}?text=${encodeURIComponent(message)}`;
 }
 
-export function buildJobWhatsAppMessage(title: string, company: string, location: string): string {
-  return `Hello, I am applying for the ${title} position at ${company} (${location}) listed on MARKET & JOBS.`;
+export function buildJobWhatsAppMessage(title: string, employer: string, location: string): string {
+  return `Hello, I am applying for the ${title} position at ${employer} (${location}) listed on MARKET & JOBS Zimbabwe.`;
 }
 
 export function buildMarketWhatsAppMessage(
@@ -61,7 +62,7 @@ export function buildMarketWhatsAppMessage(
   currency: string,
   location: string
 ): string {
-  return `Hello, I am interested in "${title}" (${currency} ${price}) in ${location} listed on MARKET & JOBS. Is it still available?`;
+  return `Hello, I am interested in "${title}" (${currency} ${price}) in ${location} listed on MARKET & JOBS Zimbabwe. Is it still available?`;
 }
 
 export function buildHouseWhatsAppMessage(
@@ -70,10 +71,18 @@ export function buildHouseWhatsAppMessage(
   city: string,
   price: number
 ): string {
-  return `Hello, I am interested in renting "${title}" in ${suburb}, ${city} ($${price}/month) listed on MARKET & JOBS. Is it available for viewing?`;
+  return `Hello Landlord, I am interested in renting "${title}" in ${suburb}, ${city} ($${price}/month) listed on MARKET & JOBS Zimbabwe. Is it available for viewing?`;
 }
 
-export function formatTimeAgo(timestampMs: number): string {
+export function formatTimeAgo(value: string | number | Date): string {
+  const timestampMs =
+    typeof value === 'number'
+      ? value
+      : value instanceof Date
+        ? value.getTime()
+        : new Date(value).getTime();
+
+  if (!Number.isFinite(timestampMs)) return '';
   const diffSec = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000));
   if (diffSec < 60) return 'Just now';
   const diffMin = Math.floor(diffSec / 60);
@@ -85,5 +94,16 @@ export function formatTimeAgo(timestampMs: number): string {
   return new Date(timestampMs).toLocaleDateString('en-ZW', {
     day: 'numeric',
     month: 'short',
+  });
+}
+
+export function formatShortDate(value: string | number | Date | null | undefined): string {
+  if (!value) return '—';
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-ZW', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
   });
 }

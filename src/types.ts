@@ -22,8 +22,17 @@ export const ZIMBABWE_LOCATIONS = [
   'Other Zimbabwe',
 ] as const;
 
-export const JOB_CATEGORIES = [
-  'All',
+export const EMPLOYMENT_TYPES = [
+  'Full-time',
+  'Part-time',
+  'Contract',
+  'Casual',
+  'Internship',
+] as const;
+
+export type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
+
+export const DEFAULT_JOB_CATEGORIES = [
   'Sales & Retail',
   'Trades & Artisans',
   'Admin & Office',
@@ -36,8 +45,7 @@ export const JOB_CATEGORIES = [
   'Domestic & Care',
 ] as const;
 
-export const MARKET_CATEGORIES = [
-  'All',
+export const DEFAULT_MARKET_CATEGORIES = [
   'Electronics & Solar',
   'Phones & Computers',
   'Vehicles & Spares',
@@ -72,33 +80,65 @@ export const HOUSE_FACILITIES = [
   'Security Guard',
 ] as const;
 
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'correction_requested';
+export type VerificationStatus = 'unverified' | 'pending' | 'verified' | 'suspended';
+export type AccountStatus = 'active' | 'suspended';
+export type LifecycleStatus = 'active' | 'filled' | 'sold' | 'rented' | 'expired';
+
 export interface UserProfile {
-  id: string;
+  id: number;
+  uid: string;
+  email: string;
   fullName: string;
   phone: string;
+  whatsapp: string;
   city: string;
   avatar: string | null;
-  createdAt: number;
+  verificationStatus: VerificationStatus;
+  verificationNote: string | null;
+  accountStatus: AccountStatus;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface NotificationItem {
+  id: number;
+  userId: number;
+  title: string;
+  message: string;
+  category: 'approval' | 'verification' | 'sponsorship' | 'account' | string;
+  isRead: boolean;
+  createdAt: string;
 }
 
 export interface JobListing {
-  id: string;
-  userId: string;
+  id: number;
+  userId: number | null;
+  authorUid: string;
   authorName: string;
   title: string;
-  company: string;
+  employer: string;
   description: string;
   requirements: string;
   salary: string | null;
+  employmentType: string;
   category: string;
   location: string;
   whatsapp: string;
-  createdAt: number;
+  approvalStatus: ApprovalStatus;
+  moderationReason: string | null;
+  lifecycleStatus: LifecycleStatus;
+  isSponsored: boolean;
+  sponsoredUntil: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  isVerified?: boolean;
 }
 
 export interface MarketListing {
-  id: string;
-  userId: string;
+  id: number;
+  userId: number | null;
+  authorUid: string;
   authorName: string;
   title: string;
   price: number;
@@ -108,12 +148,20 @@ export interface MarketListing {
   location: string;
   photos: string[];
   whatsapp: string;
-  createdAt: number;
+  approvalStatus: ApprovalStatus;
+  moderationReason: string | null;
+  lifecycleStatus: LifecycleStatus;
+  isSponsored: boolean;
+  sponsoredUntil: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  isVerified?: boolean;
 }
 
 export interface HouseListing {
-  id: string;
-  userId: string;
+  id: number;
+  userId: number | null;
+  authorUid: string;
   authorName: string;
   propertyType: 'House' | 'Room' | 'Flat' | 'Apartment' | 'Cottage' | 'Commercial';
   title: string;
@@ -125,5 +173,60 @@ export interface HouseListing {
   facilities: string[];
   photos: string[];
   whatsapp: string;
-  createdAt: number;
+  approvalStatus: ApprovalStatus;
+  moderationReason: string | null;
+  lifecycleStatus: LifecycleStatus;
+  isSponsored: boolean;
+  sponsoredUntil: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  isVerified?: boolean;
+}
+
+export interface SponsorshipPlan {
+  id: number;
+  name: string;
+  durationDays: number;
+  priceUsd: number;
+  isActive: boolean;
+}
+
+export interface SponsorshipPayment {
+  id: number;
+  userId: number;
+  userName?: string;
+  userPhone?: string;
+  listingType: 'job' | 'market' | 'house';
+  listingId: number;
+  listingTitle: string;
+  planId: number | null;
+  durationDays: number;
+  amountUsd: number;
+  paymentMethod: string;
+  paymentReference: string;
+  status: 'pending' | 'confirmed' | 'rejected' | 'expired';
+  adminNote: string | null;
+  startsAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+export interface PlatformMeta {
+  categories: {
+    job: string[];
+    market: string[];
+    house: string[];
+  };
+  sponsorshipPlans: SponsorshipPlan[];
+  paymentInstructions: string;
+}
+
+export interface AdminAccount {
+  id: number;
+  username: string;
+  fullName: string;
+  role: 'super_admin' | 'moderator' | 'user_manager' | 'sponsorship_manager';
+  permissions: string[];
+  isActive?: boolean;
+  createdAt?: string;
 }

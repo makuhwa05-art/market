@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Briefcase, Home, ImagePlus, ShoppingBag, Trash2, Wand2, X } from 'lucide-react';
+import { Briefcase, Home, ImagePlus, Info, ShoppingBag, Trash2, Wand2, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import {
+  DEFAULT_JOB_CATEGORIES,
+  DEFAULT_MARKET_CATEGORIES,
+  EMPLOYMENT_TYPES,
   HOUSE_FACILITIES,
   HOUSE_TYPES,
-  JOB_CATEGORIES,
-  MARKET_CATEGORIES,
   ZIMBABWE_LOCATIONS,
 } from '../types';
 import type { HouseListing, JobListing, MarketListing, TabType } from '../types';
@@ -21,14 +22,20 @@ interface PostModalProps {
   isOpen: boolean;
   editTarget: EditTarget | null;
   defaultTab?: TabType;
+  jobCategories?: string[];
+  marketCategories?: string[];
+  houseTypes?: string[];
   onClose: () => void;
   onRequireAuth: () => void;
-  onSaved: (tab: TabType) => void;
+  onSaved: (tab: TabType, message: string) => void;
 }
 
 export function PostModal({
   isOpen,
   editTarget,
+  jobCategories,
+  marketCategories,
+  houseTypes,
   onClose,
   onRequireAuth,
   onSaved,
@@ -40,10 +47,19 @@ export function PostModal({
   const [error, setError] = useState('');
   const [photoStatus, setPhotoStatus] = useState('');
 
+  const activeJobCats = jobCategories && jobCategories.length > 0 ? jobCategories : [...DEFAULT_JOB_CATEGORIES];
+  const activeMarketCats =
+    marketCategories && marketCategories.length > 0 ? marketCategories : [...DEFAULT_MARKET_CATEGORIES];
+  const activeHouseTypes =
+    houseTypes && houseTypes.length > 0
+      ? houseTypes
+      : HOUSE_TYPES.filter((t) => t !== 'All');
+
   // Job fields
   const [jobTitle, setJobTitle] = useState('');
-  const [company, setCompany] = useState('');
-  const [jobCategory, setJobCategory] = useState<string>('Sales & Retail');
+  const [employer, setEmployer] = useState('');
+  const [employmentType, setEmploymentType] = useState<string>('Full-time');
+  const [jobCategory, setJobCategory] = useState<string>(activeJobCats[0] ?? 'Sales & Retail');
   const [jobLocation, setJobLocation] = useState<string>('Harare');
   const [salary, setSalary] = useState('');
   const [requirements, setRequirements] = useState('');
@@ -54,7 +70,7 @@ export function PostModal({
   const [itemTitle, setItemTitle] = useState('');
   const [itemPrice, setItemPrice] = useState('');
   const [currency, setCurrency] = useState<'USD' | 'ZiG'>('USD');
-  const [itemCategory, setItemCategory] = useState<string>('Electronics & Solar');
+  const [itemCategory, setItemCategory] = useState<string>(activeMarketCats[0] ?? 'Electronics & Solar');
   const [itemLocation, setItemLocation] = useState<string>('Harare');
   const [itemDescription, setItemDescription] = useState('');
   const [itemPhotos, setItemPhotos] = useState<string[]>([]);
@@ -82,7 +98,8 @@ export function PostModal({
         const j = editTarget.item;
         setPostType('jobs');
         setJobTitle(j.title);
-        setCompany(j.company);
+        setEmployer(j.employer);
+        setEmploymentType(j.employmentType || 'Full-time');
         setJobCategory(j.category);
         setJobLocation(j.location);
         setSalary(j.salary ?? '');
@@ -117,14 +134,14 @@ export function PostModal({
       return;
     }
 
-    // Reset for fresh post
     setPostType(null);
-    const defaultPhone = user?.phone ?? '';
-    const defaultCity = user?.city ?? 'Harare';
+    const defaultPhone = user?.whatsapp || user?.phone || '';
+    const defaultCity = user?.city || 'Harare';
 
     setJobTitle('');
-    setCompany('');
-    setJobCategory('Sales & Retail');
+    setEmployer('');
+    setEmploymentType('Full-time');
+    setJobCategory(activeJobCats[0] ?? 'Sales & Retail');
     setJobLocation(defaultCity);
     setSalary('');
     setRequirements('');
@@ -134,7 +151,7 @@ export function PostModal({
     setItemTitle('');
     setItemPrice('');
     setCurrency('USD');
-    setItemCategory('Electronics & Solar');
+    setItemCategory(activeMarketCats[0] ?? 'Electronics & Solar');
     setItemLocation(defaultCity);
     setItemDescription('');
     setItemPhotos([]);
@@ -150,7 +167,7 @@ export function PostModal({
     setHouseDescription('');
     setHousePhotos([]);
     setHouseWhatsapp(defaultPhone);
-  }, [isOpen, editTarget, user]);
+  }, [isOpen, editTarget, user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!isOpen) return null;
 
@@ -253,7 +270,8 @@ export function PostModal({
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           title: jobTitle,
-          company,
+          employer,
+          employmentType,
           category: jobCategory,
           location: jobLocation,
           salary: salary || null,
@@ -267,7 +285,12 @@ export function PostModal({
         setError(data.error || 'Could not save job post.');
         return;
       }
-      onSaved('jobs');
+      onSaved(
+        'jobs',
+        isEditing
+          ? 'Job changes saved and submitted for admin approval.'
+          : 'Job submitted! It enters Pending Approval and will go live once approved.'
+      );
       onClose();
     } catch {
       setError('Network error while saving job post.');
@@ -312,7 +335,12 @@ export function PostModal({
         setError(data.error || 'Could not save market listing.');
         return;
       }
-      onSaved('market');
+      onSaved(
+        'market',
+        isEditing
+          ? 'Market listing updated and submitted for admin approval.'
+          : 'Market listing submitted! It enters Pending Approval and will go live once approved.'
+      );
       onClose();
     } catch {
       setError('Network error while saving market listing.');
@@ -359,7 +387,12 @@ export function PostModal({
         setError(data.error || 'Could not save property listing.');
         return;
       }
-      onSaved('houses');
+      onSaved(
+        'houses',
+        isEditing
+          ? 'Property updated and submitted for admin approval.'
+          : 'Property submitted! It enters Pending Approval and will go live once approved.'
+      );
       onClose();
     } catch {
       setError('Network error while saving property listing.');
@@ -423,14 +456,14 @@ export function PostModal({
           {!user ? (
             <div className="py-4 space-y-4 text-center">
               <p className="text-sm text-slate-700 leading-relaxed">
-                Sign in or create a quick profile so you can publish posts and edit or remove them anytime.
+                Sign in with your Google account and save your Zimbabwe WhatsApp contact to publish and manage your ads.
               </p>
               <button
                 type="button"
                 onClick={onRequireAuth}
                 className="w-full min-h-[46px] rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold transition-colors"
               >
-                Sign In or Create Account
+                Sign In to Continue
               </button>
             </div>
           ) : !postType ? (
@@ -478,12 +511,19 @@ export function PostModal({
                 <div>
                   <div className="text-sm font-bold text-slate-900">Advertise a House / Room</div>
                   <div className="text-xs text-slate-500 mt-0.5">
-                    Rent out houses, rooms, cottages, flats, or shops
+                    Rent out houses, rooms, cottages, flats, or commercial space
                   </div>
                 </div>
               </button>
             </div>
-          ) : null}
+          ) : (
+            <div className="flex items-start gap-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+              <Info className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" aria-hidden="true" />
+              <span>
+                All new and edited ads enter <strong>Pending Approval</strong> for quick moderation before appearing publicly. Track approval &amp; sponsor options in your Account menu.
+              </span>
+            </div>
+          )}
 
           {error && (
             <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3.5 py-2.5" role="alert">
@@ -507,39 +547,41 @@ export function PostModal({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Company Name</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Employer / Company</label>
                   <input
                     type="text"
                     required
-                    value={company}
-                    onChange={(e) => setCompany(e.target.value)}
+                    value={employer}
+                    onChange={(e) => setEmployer(e.target.value)}
                     placeholder="e.g. SunGrid Zimbabwe"
                     className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                    Salary (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={salary}
-                    onChange={(e) => setSalary(e.target.value)}
-                    placeholder="e.g. USD 500/month"
-                    className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
-                  />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Employment Type</label>
+                  <select
+                    value={employmentType}
+                    onChange={(e) => setEmploymentType(e.target.value)}
+                    className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                  >
+                    {EMPLOYMENT_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1.5">Category</label>
                   <select
                     value={jobCategory}
                     onChange={(e) => setJobCategory(e.target.value)}
-                    className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                    className="w-full min-h-[44px] px-3 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
                   >
-                    {JOB_CATEGORIES.filter((c) => c !== 'All').map((cat) => (
+                    {activeJobCats.map((cat) => (
                       <option key={cat} value={cat}>
                         {cat}
                       </option>
@@ -551,7 +593,7 @@ export function PostModal({
                   <select
                     value={jobLocation}
                     onChange={(e) => setJobLocation(e.target.value)}
-                    className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                    className="w-full min-h-[44px] px-3 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
                   >
                     {ZIMBABWE_LOCATIONS.map((loc) => (
                       <option key={loc} value={loc}>
@@ -559,6 +601,16 @@ export function PostModal({
                       </option>
                     ))}
                   </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Salary (Optional)</label>
+                  <input
+                    type="text"
+                    value={salary}
+                    onChange={(e) => setSalary(e.target.value)}
+                    placeholder="e.g. USD 500/mo"
+                    className="w-full min-h-[44px] px-3 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                  />
                 </div>
               </div>
 
@@ -605,7 +657,7 @@ export function PostModal({
                 disabled={submitting}
                 className="w-full min-h-[48px] rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold transition-colors disabled:opacity-60"
               >
-                {submitting ? 'Publishing...' : editTarget ? 'Save Changes' : 'Publish Job'}
+                {submitting ? 'Submitting...' : editTarget ? 'Save & Resubmit for Approval' : 'Submit Job for Approval'}
               </button>
             </form>
           )}
@@ -661,7 +713,7 @@ export function PostModal({
                     onChange={(e) => setItemCategory(e.target.value)}
                     className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
                   >
-                    {MARKET_CATEGORIES.filter((c) => c !== 'All').map((cat) => (
+                    {activeMarketCats.map((cat) => (
                       <option key={cat} value={cat}>
                         {cat}
                       </option>
@@ -752,7 +804,7 @@ export function PostModal({
                 disabled={submitting}
                 className="w-full min-h-[48px] rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold transition-colors disabled:opacity-60"
               >
-                {submitting ? 'Publishing...' : editTarget ? 'Save Changes' : 'Publish Listing'}
+                {submitting ? 'Submitting...' : editTarget ? 'Save & Resubmit for Approval' : 'Submit Listing for Approval'}
               </button>
             </form>
           )}
@@ -769,7 +821,7 @@ export function PostModal({
                     }
                     className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
                   >
-                    {HOUSE_TYPES.filter((t) => t !== 'All').map((t) => (
+                    {activeHouseTypes.map((t) => (
                       <option key={t} value={t}>
                         {t}
                       </option>
@@ -947,7 +999,7 @@ export function PostModal({
                 disabled={submitting}
                 className="w-full min-h-[48px] rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold transition-colors disabled:opacity-60"
               >
-                {submitting ? 'Publishing...' : editTarget ? 'Save Changes' : 'Publish Property'}
+                {submitting ? 'Submitting...' : editTarget ? 'Save & Resubmit for Approval' : 'Submit Property for Approval'}
               </button>
             </form>
           )}

@@ -1,11 +1,12 @@
 import crypto from 'node:crypto';
 
+const RAW_SECRET = process.env.ADMIN_TOKEN_SECRET || process.env.SESSION_SECRET;
 const SESSION_SECRET =
-  process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 16
-    ? process.env.SESSION_SECRET
+  RAW_SECRET && RAW_SECRET.length >= 16
+    ? RAW_SECRET
     : crypto.randomBytes(32).toString('hex');
 
-const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 14; // 14 days
+const ADMIN_TOKEN_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
 
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -28,11 +29,26 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   }
 }
 
-export function signAuthToken(userId: string): string {
+export function constantTimeEqualText(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+export interface AdminTokenPayload {
+  adminId: number;
+  username: string;
+  role: string;
+}
+
+export function signAdminToken(payloadData: AdminTokenPayload): string {
   const payload = Buffer.from(
     JSON.stringify({
-      sub: userId,
-      exp: Date.now() + TOKEN_TTL_MS,
+      sub: 'platform-admin',
+      adminId: payloadData.adminId,
+      username: payloadData.username,
+      role: payloadData.role,
+      exp: Date.now() + ADMIN_TOKEN_TTL_MS,
     })
   ).toString('base64url');
   const sig = crypto
@@ -42,7 +58,7 @@ export function signAuthToken(userId: string): string {
   return `${payload}.${sig}`;
 }
 
-export function verifyAuthToken(token: string): { userId: string } | null {
+export function verifyAdminToken(token: string): AdminTokenPayload | null {
   if (!token || typeof token !== 'string') return null;
   const parts = token.split('.');
   if (parts.length !== 2) return null;
@@ -61,15 +77,28 @@ export function verifyAuthToken(token: string): { userId: string } | null {
 
     const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
       sub?: unknown;
+      adminId?: unknown;
+      username?: unknown;
+      role?: unknown;
       exp?: unknown;
     };
-    if (typeof decoded.sub !== 'string' || typeof decoded.exp !== 'number') {
+    if (
+      decoded.sub !== 'platform-admin' ||
+      typeof decoded.adminId !== 'number' ||
+      typeof decoded.username !== 'string' ||
+      typeof decoded.role !== 'string' ||
+      typeof decoded.exp !== 'number'
+    ) {
       return null;
     }
     if (Date.now() > decoded.exp) {
       return null;
     }
-    return { userId: decoded.sub };
+    return {
+      adminId: decoded.adminId,
+      username: decoded.username,
+      role: decoded.role,
+    };
   } catch {
     return null;
   }

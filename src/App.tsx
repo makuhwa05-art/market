@@ -3,6 +3,7 @@ import {
   Briefcase,
   ChevronLeft,
   ChevronRight,
+  Heart,
   Home,
   Layers,
   MapPin,
@@ -17,6 +18,7 @@ import { AuthProfileModal, type AccountModalTab } from './components/AuthProfile
 import { DetailModal, type DetailSelection } from './components/DetailModal';
 import { HouseCard, JobCard, MarketCard } from './components/ListingCards';
 import { PostModal, type EditTarget } from './components/PostModal';
+import { SinglesSection } from './components/SinglesSection';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import {
   DEFAULT_JOB_CATEGORIES,
@@ -30,7 +32,7 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
   const { user, unreadCount, authHeaders } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>('jobs');
 
-  // Dynamic metadata (categories + sponsorship plans)
+  // Dynamic metadata (categories + sponsorship plans + dating & payment capabilities)
   const [meta, setMeta] = useState<PlatformMeta>({
     categories: {
       job: [...DEFAULT_JOB_CATEGORIES],
@@ -38,8 +40,13 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
       house: HOUSE_TYPES.filter((t) => t !== 'All'),
     },
     sponsorshipPlans: [],
-    paymentInstructions: 'Pay via EcoCash, InnBucks, or Bank Transfer and submit your transaction reference.',
+    datingPackages: [],
+    datingEnabled: true,
+    datingAllowHivDisclosure: true,
+    paymentCapabilities: undefined,
+    paymentInstructions: 'Pay via Paynow Zimbabwe, PayPal, EcoCash, InnBucks, or Bank Transfer.',
   });
+  const [singlesKey, setSinglesKey] = useState(0);
 
   // Search, filter & pagination state
   const [searchQuery, setSearchQuery] = useState('');
@@ -82,6 +89,10 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
             : HOUSE_TYPES.filter((t) => t !== 'All'),
         },
         sponsorshipPlans: data.sponsorshipPlans ?? [],
+        datingPackages: data.datingPackages ?? [],
+        datingEnabled: data.datingEnabled !== false,
+        datingAllowHivDisclosure: data.datingAllowHivDisclosure !== false,
+        paymentCapabilities: data.paymentCapabilities,
         paymentInstructions: data.paymentInstructions ?? '',
       });
     } catch {
@@ -93,6 +104,64 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
     loadMeta();
   }, [loadMeta]);
 
+  // Verify returning Paynow / PayPal checkouts server-side when user returns from gateway
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const paymentRef = params.get('paymentRef');
+    const paymentCancel = params.get('paymentCancel');
+    const paypalOrderId = params.get('token');
+
+    if (paymentCancel === '1') {
+      window.history.replaceState({}, '', window.location.pathname);
+      setBannerMsg('Payment checkout was cancelled. No charges were activated.');
+      return;
+    }
+
+    if (!paymentRef || !user) return;
+
+    let cancelled = false;
+    fetch('/api/payments/verify', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+      },
+      body: JSON.stringify({
+        merchantReference: paymentRef,
+        paypalOrderId: paypalOrderId || undefined,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled) return;
+        window.history.replaceState({}, '', window.location.pathname);
+        if (data.paid) {
+          setBannerMsg(
+            `Payment verified (${data.transaction?.merchantReference || paymentRef})! Your access is now active.`
+          );
+          if (data.transaction?.featureType === 'dating_package') {
+            setActiveTab('singles');
+            setSinglesKey((k) => k + 1);
+          }
+        } else {
+          setBannerMsg(
+            data.error ||
+              data.gatewayStatus ||
+              'Payment is still awaiting confirmation from the gateway.'
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBannerMsg('Could not verify payment status automatically. Please check your account.');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, authHeaders]);
+
   const handleSelectTab = (tab: TabType) => {
     setActiveTab(tab);
     setCategoryFilter('All');
@@ -100,6 +169,7 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
   };
 
   const fetchFeed = useCallback(async () => {
+    if (activeTab === 'singles') return;
     setLoading(true);
     setError('');
     try {
@@ -231,8 +301,8 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
             MARKET &amp; JOBS
           </button>
 
-          {/* Desktop Primary Tabs (ONLY 3: Jobs, Market, Houses) */}
-          <nav className="hidden md:flex items-center gap-7 h-full" aria-label="Main navigation">
+          {/* Desktop Primary Tabs (Jobs, Market, Houses, Singles) */}
+          <nav className="hidden md:flex items-center gap-6 h-full" aria-label="Main navigation">
             <button
               type="button"
               onClick={() => handleSelectTab('jobs')}
@@ -268,6 +338,18 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
             >
               <Home className="w-4 h-4" aria-hidden="true" />
               Houses
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelectTab('singles')}
+              className={`h-full inline-flex items-center gap-2 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'singles'
+                  ? 'border-rose-900 text-rose-900'
+                  : 'border-transparent text-slate-600 hover:text-rose-900'
+              }`}
+            >
+              <Heart className="w-4 h-4" aria-hidden="true" />
+              Singles
             </button>
           </nav>
 
@@ -326,6 +408,20 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
           </div>
         )}
 
+        {activeTab === 'singles' ? (
+          <SinglesSection
+            key={singlesKey}
+            datingPackages={meta.datingPackages ?? []}
+            datingEnabled={meta.datingEnabled !== false}
+            allowHivDisclosure={meta.datingAllowHivDisclosure !== false}
+            paymentCapabilities={meta.paymentCapabilities}
+            paymentInstructions={meta.paymentInstructions}
+            onRequireAuth={() =>
+              openAccountModal('profile', 'Sign in or create an account to access the optional 18+ Singles section.')
+            }
+          />
+        ) : (
+          <>
         {/* Heading + Result Summary */}
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
@@ -569,6 +665,8 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
             )}
           </>
         )}
+          </>
+        )}
 
         <footer className="pt-8 pb-4 border-t border-slate-200 flex items-center justify-between text-xs text-slate-400">
           <span>MARKET &amp; JOBS · Zimbabwe</span>
@@ -582,12 +680,12 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
         </footer>
       </main>
 
-      {/* Mobile Fixed Bottom Navigation (ONLY 3 TABS: Jobs, Market, Houses) */}
+      {/* Mobile Fixed Bottom Navigation (4 TABS: Jobs, Market, Houses, Singles) */}
       <nav
         aria-label="Mobile navigation"
         className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-14 bg-white/95 backdrop-blur-md border-t border-slate-200 pb-safe"
       >
-        <div className="grid grid-cols-3 h-full">
+        <div className="grid grid-cols-4 h-full">
           <button
             type="button"
             onClick={() => handleSelectTab('jobs')}
@@ -620,6 +718,17 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
             <Home className="w-5 h-5" aria-hidden="true" />
             <span className="text-[11px] font-semibold leading-none">Houses</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => handleSelectTab('singles')}
+            className={`flex flex-col items-center justify-center gap-0.5 transition-colors ${
+              activeTab === 'singles' ? 'text-rose-900' : 'text-slate-500 hover:text-rose-900'
+            }`}
+          >
+            <Heart className="w-5 h-5" aria-hidden="true" />
+            <span className="text-[11px] font-semibold leading-none">Singles</span>
+          </button>
         </div>
       </nav>
 
@@ -634,7 +743,7 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
       <PostModal
         isOpen={postModalOpen}
         editTarget={editTarget}
-        defaultTab={activeTab}
+        defaultTab={activeTab === 'singles' ? 'jobs' : activeTab}
         jobCategories={meta.categories.job}
         marketCategories={meta.categories.market}
         houseTypes={meta.categories.house}
@@ -645,7 +754,7 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
         onRequireAuth={() => {
           setResumePostAfterAuth(true);
           setPostModalOpen(false);
-          openAccountModal('profile', 'Sign in with Google to publish and manage your listing.');
+          openAccountModal('profile', 'Sign in or create an account to publish and manage your listing.');
         }}
         onSaved={(tab, message) => {
           setActiveTab(tab);
@@ -661,6 +770,7 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
         initialTab={authInitialTab}
         promptMessage={authPrompt}
         sponsorshipPlans={meta.sponsorshipPlans}
+        paymentCapabilities={meta.paymentCapabilities}
         paymentInstructions={meta.paymentInstructions}
         onClose={() => {
           setAuthModalOpen(false);
@@ -676,6 +786,7 @@ function MainApp({ onOpenAdmin }: { onOpenAdmin: () => void }) {
         }}
         onEditListing={(target) => openEditModal(target)}
         onListingChanged={fetchFeed}
+        onOpenSingles={() => handleSelectTab('singles')}
       />
     </div>
   );

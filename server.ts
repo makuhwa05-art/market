@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import express from 'express';
 import path from 'node:path';
 import { and, count, desc, eq, gte, ilike, lte, or, sql } from 'drizzle-orm';
@@ -9,10 +10,14 @@ import {
   admins,
   auditLogs,
   categories,
+  datingPackages,
+  datingProfiles,
+  datingSubscriptions,
   houses,
   jobs,
   marketItems,
   notifications,
+  paymentTransactions,
   platformSettings,
   reports,
   sponsorshipPayments,
@@ -23,9 +28,13 @@ import { adminAuth } from './src/lib/firebase-admin.ts';
 import {
   hashPassword,
   signAdminToken,
+  signUserToken,
   verifyAdminToken,
   verifyPassword,
+  verifyUserToken,
 } from './server/auth.ts';
+import { registerDatingAndPaymentRoutes } from './server/datingAndPaymentsRoutes.ts';
+import { getGatewayCapabilities } from './server/payments.ts';
 import {
   isValidZimbabwePhone,
   normalizeZimbabwePhone,
@@ -36,6 +45,7 @@ import {
   ALL_PERMISSIONS,
   DEFAULT_EXPIRY_DAYS,
   ensureSeeded,
+  expireStaleDatingSubscriptions,
   expireStaleSponsorships,
   getPublicHouses,
   getPublicJobs,
@@ -66,12 +76,34 @@ function cleanText(val: unknown, maxLen: number): string {
   return val.trim().slice(0, maxLen);
 }
 
+function parsePositiveId(val: unknown): number | null {
+  const n = Number(val);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function toPublicUser<T extends { passwordHash?: string | null }>(userRow: T): Omit<T, 'passwordHash'> {
+  const { passwordHash: _omitted, ...safeUser } = userRow;
+  return safeUser;
+}
+
 async function resolveFirebaseUser(req: express.Request): Promise<DbUser | null> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const idToken = authHeader.slice(7).trim();
   if (!idToken) return null;
 
+  // 1. Check custom platform user Bearer token (email/phone + password accounts)
+  const verifiedUser = verifyUserToken(idToken);
+  if (verifiedUser) {
+    const [userRow] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, verifiedUser.userId))
+      .limit(1);
+    return userRow ?? null;
+  }
+
+  // 2. Fallback to Firebase Auth ID token (Continue with Google)
   try {
     const decoded = await adminAuth.verifyIdToken(idToken);
     const email = decoded.email || `${decoded.uid}@firebase.user`;
@@ -179,22 +211,30 @@ async function startServer() {
   app.get('/api/meta', async (_req, res) => {
     try {
       await ensureSeeded();
-      const [allCats, plans, paymentInstructions] = await Promise.all([
-        db
-          .select()
-          .from(categories)
-          .where(eq(categories.isActive, true))
-          .orderBy(categories.sortOrder, categories.name),
-        db
-          .select()
-          .from(sponsorshipPlans)
-          .where(eq(sponsorshipPlans.isActive, true))
-          .orderBy(sponsorshipPlans.durationDays),
-        getSettingValue(
-          'payment_instructions',
-          'Pay via EcoCash, InnBucks, or Bank Transfer and submit your transaction reference.'
-        ),
-      ]);
+      const [allCats, plans, pkgRows, paymentInstructions, datingEnabled, datingAllowHiv] =
+        await Promise.all([
+          db
+            .select()
+            .from(categories)
+            .where(eq(categories.isActive, true))
+            .orderBy(categories.sortOrder, categories.name),
+          db
+            .select()
+            .from(sponsorshipPlans)
+            .where(eq(sponsorshipPlans.isActive, true))
+            .orderBy(sponsorshipPlans.durationDays),
+          db
+            .select()
+            .from(datingPackages)
+            .where(eq(datingPackages.isActive, true))
+            .orderBy(datingPackages.priceUsd),
+          getSettingValue(
+            'payment_instructions',
+            'Pay via Paynow Zimbabwe, PayPal, EcoCash, InnBucks, or Bank Transfer.'
+          ),
+          getSettingValue('dating_enabled', 'true'),
+          getSettingValue('dating_allow_hiv_disclosure', 'true'),
+        ]);
 
       res.json({
         categories: {
@@ -203,6 +243,10 @@ async function startServer() {
           house: allCats.filter((c) => c.section === 'house').map((c) => c.name),
         },
         sponsorshipPlans: plans,
+        datingPackages: pkgRows,
+        datingEnabled: datingEnabled === 'true',
+        datingAllowHivDisclosure: datingAllowHiv === 'true',
+        paymentCapabilities: getGatewayCapabilities(),
         paymentInstructions,
       });
     } catch (err) {
@@ -270,7 +314,7 @@ async function startServer() {
       const reason = cleanText(req.body?.reason, 100);
       const details = cleanText(req.body?.details, 500) || null;
 
-      if (!['job', 'market', 'house'].includes(listingType) || !Number.isInteger(listingId) || !reason) {
+      if (!['job', 'market', 'house', 'dating'].includes(listingType) || !Number.isInteger(listingId) || !reason) {
         res.status(400).json({ error: 'Please select a reason for this report.' });
         return;
       }
@@ -286,9 +330,16 @@ async function startServer() {
           .where(eq(marketItems.id, listingId))
           .limit(1);
         listingTitle = row?.title ?? '';
-      } else {
+      } else if (listingType === 'house') {
         const [row] = await db.select({ title: houses.title }).from(houses).where(eq(houses.id, listingId)).limit(1);
         listingTitle = row?.title ?? '';
+      } else {
+        const [row] = await db
+          .select({ name: datingProfiles.displayName })
+          .from(datingProfiles)
+          .where(eq(datingProfiles.id, listingId))
+          .limit(1);
+        listingTitle = row ? `Singles: ${row.name}` : '';
       }
 
       if (!listingTitle) {
@@ -329,6 +380,166 @@ async function startServer() {
   });
 
   // ============================================================================
+  // User Sign Up, Sign In & Profile Onboarding
+  // ============================================================================
+  app.post('/api/auth/register', async (req, res) => {
+    try {
+      await ensureSeeded();
+      const fullName = cleanText(req.body?.fullName, 80);
+      const email = cleanText(req.body?.email, 120).toLowerCase();
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      const rawPhone = cleanText(req.body?.phone, 30);
+      const rawWhatsapp = cleanText(req.body?.whatsapp, 30) || rawPhone;
+      const city = cleanText(req.body?.city, 60) || 'Harare';
+      const rawDatingOptIn = cleanText(req.body?.datingOptIn, 10).toLowerCase();
+      const datingOptIn = ['yes', 'no', 'unset'].includes(rawDatingOptIn) ? rawDatingOptIn : 'unset';
+
+      if (fullName.length < 2) {
+        res.status(400).json({ error: 'Please enter your full name (at least 2 characters).' });
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        res.status(400).json({ error: 'Please enter a valid email address.' });
+        return;
+      }
+      if (password.length < 6 || password.length > 128) {
+        res.status(400).json({ error: 'Password must be between 6 and 128 characters.' });
+        return;
+      }
+      if (!isValidZimbabwePhone(rawPhone) || !isValidZimbabwePhone(rawWhatsapp)) {
+        res.status(400).json({ error: 'Enter valid Zimbabwe phone and WhatsApp numbers (e.g. 0771234567).' });
+        return;
+      }
+
+      const [existing] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(sql`LOWER(${users.email})`, email))
+        .limit(1);
+
+      if (existing) {
+        res.status(409).json({ error: 'An account with this email already exists. Please sign in instead.' });
+        return;
+      }
+
+      const phone = normalizeZimbabwePhone(rawPhone);
+      const whatsapp = normalizeZimbabwePhone(rawWhatsapp);
+      const passwordHash = hashPassword(password);
+      const uid = `local-${crypto.randomUUID()}`;
+
+      const [created] = await db
+        .insert(users)
+        .values({
+          uid,
+          email,
+          passwordHash,
+          fullName,
+          phone,
+          whatsapp,
+          city,
+          avatar: null,
+          datingOptIn,
+          verificationStatus: 'unverified',
+          accountStatus: 'active',
+        })
+        .returning();
+
+      const token = signUserToken({
+        userId: created.id,
+        uid: created.uid,
+        email: created.email,
+      });
+
+      await logAudit({
+        actorType: 'user',
+        actorId: String(created.id),
+        actorName: created.fullName,
+        action: 'user_registered',
+        targetType: 'user',
+        targetId: String(created.id),
+        summary: `${created.fullName} created a new account (${city})`,
+      });
+
+      res.status(201).json({
+        token,
+        user: toPublicUser(created),
+        notifications: [],
+        unreadCount: 0,
+      });
+    } catch (err) {
+      console.error('Register error:', err);
+      res.status(500).json({ error: 'Failed to create account.' });
+    }
+  });
+
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      await ensureSeeded();
+      const identifier = cleanText(req.body?.identifier ?? req.body?.email, 120);
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+      if (!identifier || !password) {
+        res.status(400).json({ error: 'Email or phone number and password are required.' });
+        return;
+      }
+
+      let userRow: DbUser | undefined;
+      if (identifier.includes('@')) {
+        const [found] = await db
+          .select()
+          .from(users)
+          .where(eq(sql`LOWER(${users.email})`, identifier.toLowerCase()))
+          .limit(1);
+        userRow = found;
+      } else if (isValidZimbabwePhone(identifier)) {
+        const normalized = normalizeZimbabwePhone(identifier);
+        const [found] = await db
+          .select()
+          .from(users)
+          .where(or(eq(users.phone, normalized), eq(users.whatsapp, normalized)))
+          .limit(1);
+        userRow = found;
+      }
+
+      if (!userRow || !userRow.passwordHash || !verifyPassword(password, userRow.passwordHash)) {
+        res.status(401).json({
+          error:
+            'Invalid email, phone number, or password. If you created your account with Google, tap Continue with Google.',
+        });
+        return;
+      }
+
+      if (userRow.accountStatus === 'suspended' || userRow.verificationStatus === 'suspended') {
+        res.status(403).json({ error: 'Your account has been suspended by an administrator.' });
+        return;
+      }
+
+      const userNotifs = await db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.userId, userRow.id))
+        .orderBy(desc(notifications.createdAt))
+        .limit(30);
+
+      const token = signUserToken({
+        userId: userRow.id,
+        uid: userRow.uid,
+        email: userRow.email,
+      });
+
+      res.json({
+        token,
+        user: toPublicUser(userRow),
+        notifications: userNotifs,
+        unreadCount: userNotifs.filter((n) => !n.isRead).length,
+      });
+    } catch (err) {
+      console.error('Login error:', err);
+      res.status(500).json({ error: 'Failed to sign in.' });
+    }
+  });
+
+  // ============================================================================
   // Authenticated User Profile, Listings & Sponsorship Requests
   // ============================================================================
   app.get('/api/auth/me', requireUserAuth, async (req: AuthedUserRequest, res) => {
@@ -342,7 +553,7 @@ async function startServer() {
         .limit(30);
 
       res.json({
-        user,
+        user: toPublicUser(user),
         notifications: userNotifs,
         unreadCount: userNotifs.filter((n) => !n.isRead).length,
       });
@@ -376,6 +587,10 @@ async function startServer() {
 
       const phone = normalizeZimbabwePhone(rawPhone);
       const whatsapp = normalizeZimbabwePhone(rawWhatsapp);
+      const rawDatingOptIn = cleanText(req.body?.datingOptIn, 10).toLowerCase();
+      const datingOptIn = ['yes', 'no', 'unset'].includes(rawDatingOptIn)
+        ? rawDatingOptIn
+        : user.datingOptIn;
 
       const [updated] = await db
         .update(users)
@@ -385,6 +600,7 @@ async function startServer() {
           whatsapp,
           city,
           avatar,
+          datingOptIn,
           updatedAt: new Date(),
         })
         .where(eq(users.id, user.id))
@@ -406,7 +622,7 @@ async function startServer() {
         summary: `${fullName} updated their profile (${city})`,
       });
 
-      res.json({ user: updated });
+      res.json({ user: toPublicUser(updated) });
     } catch {
       res.status(500).json({ error: 'Failed to update profile.' });
     }
@@ -446,7 +662,7 @@ async function startServer() {
         summary: `${user.fullName} requested account verification`,
       });
 
-      res.json({ user: updated });
+      res.json({ user: toPublicUser(updated) });
     } catch {
       res.status(500).json({ error: 'Could not submit verification request.' });
     }
@@ -556,7 +772,11 @@ async function startServer() {
   app.put('/api/jobs/:id', requireUserAuth, async (req: AuthedUserRequest, res) => {
     try {
       const user = req.currentUser!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid job ID.' });
+        return;
+      }
       const [existing] = await db.select().from(jobs).where(eq(jobs.id, id)).limit(1);
       if (!existing) {
         res.status(404).json({ error: 'Job listing not found.' });
@@ -627,7 +847,11 @@ async function startServer() {
   app.delete('/api/jobs/:id', requireUserAuth, async (req: AuthedUserRequest, res) => {
     try {
       const user = req.currentUser!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid job ID.' });
+        return;
+      }
       const [existing] = await db.select().from(jobs).where(eq(jobs.id, id)).limit(1);
       if (!existing) {
         res.status(404).json({ error: 'Job listing not found.' });
@@ -718,7 +942,11 @@ async function startServer() {
   app.put('/api/market/:id', requireUserAuth, async (req: AuthedUserRequest, res) => {
     try {
       const user = req.currentUser!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid market listing ID.' });
+        return;
+      }
       const [existing] = await db.select().from(marketItems).where(eq(marketItems.id, id)).limit(1);
       if (!existing) {
         res.status(404).json({ error: 'Market listing not found.' });
@@ -784,7 +1012,11 @@ async function startServer() {
   app.delete('/api/market/:id', requireUserAuth, async (req: AuthedUserRequest, res) => {
     try {
       const user = req.currentUser!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid market listing ID.' });
+        return;
+      }
       const [existing] = await db.select().from(marketItems).where(eq(marketItems.id, id)).limit(1);
       if (!existing) {
         res.status(404).json({ error: 'Market listing not found.' });
@@ -890,7 +1122,11 @@ async function startServer() {
   app.put('/api/houses/:id', requireUserAuth, async (req: AuthedUserRequest, res) => {
     try {
       const user = req.currentUser!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid property ID.' });
+        return;
+      }
       const [existing] = await db.select().from(houses).where(eq(houses.id, id)).limit(1);
       if (!existing) {
         res.status(404).json({ error: 'Property listing not found.' });
@@ -973,7 +1209,11 @@ async function startServer() {
   app.delete('/api/houses/:id', requireUserAuth, async (req: AuthedUserRequest, res) => {
     try {
       const user = req.currentUser!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid property ID.' });
+        return;
+      }
       const [existing] = await db.select().from(houses).where(eq(houses.id, id)).limit(1);
       if (!existing) {
         res.status(404).json({ error: 'Property listing not found.' });
@@ -1004,7 +1244,11 @@ async function startServer() {
     try {
       const user = req.currentUser!;
       const type = String(req.params.type);
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid listing ID.' });
+        return;
+      }
       const lifecycleStatus = cleanText(req.body?.lifecycleStatus, 20);
 
       if (type === 'job' && ['active', 'filled'].includes(lifecycleStatus)) {
@@ -1127,6 +1371,31 @@ async function startServer() {
           status: 'pending',
         })
         .returning();
+
+      await db.insert(paymentTransactions).values({
+        userId: user.id,
+        featureType:
+          listingType === 'job'
+            ? 'sponsored_job'
+            : listingType === 'market'
+              ? 'sponsored_market'
+              : 'sponsored_house',
+        targetId: listingId,
+        targetTitle: listingTitle,
+        planOrPackageId: plan.id,
+        gateway: 'manual',
+        amountUsd: plan.priceUsd,
+        currency: 'USD',
+        status: 'pending',
+        merchantReference: `MJ-SP-${created.id}-${Date.now()}`,
+        gatewayReference: paymentReference,
+        metadataJson: {
+          manualMethod: paymentMethod,
+          planId: plan.id,
+          durationDays: plan.durationDays,
+          legacySponsorshipPaymentId: created.id,
+        },
+      });
 
       await logAudit({
         actorType: 'user',
@@ -1363,6 +1632,7 @@ async function startServer() {
   app.get('/api/admin/overview', requireAdminPerm(), async (_req, res) => {
     try {
       await expireStaleSponsorships();
+      await expireStaleDatingSubscriptions();
       const [
         totalUsers,
         verifiedUsers,
@@ -1388,6 +1658,10 @@ async function startServer() {
         expiredSponsorships,
         openReports,
         revenueRow,
+        datingMembersRow,
+        pendingDatingRow,
+        activeDatingSubsRow,
+        centralRevenueRow,
         recentLogs,
       ] = await Promise.all([
         db.select({ c: count() }).from(users),
@@ -1417,6 +1691,13 @@ async function startServer() {
           .select({ total: sql<number>`COALESCE(SUM(${sponsorshipPayments.amountUsd}), 0)` })
           .from(sponsorshipPayments)
           .where(or(eq(sponsorshipPayments.status, 'confirmed'), eq(sponsorshipPayments.status, 'expired'))),
+        db.select({ c: count() }).from(datingProfiles),
+        db.select({ c: count() }).from(datingProfiles).where(eq(datingProfiles.approvalStatus, 'pending')),
+        db.select({ c: count() }).from(datingSubscriptions).where(eq(datingSubscriptions.status, 'active')),
+        db
+          .select({ total: sql<number>`COALESCE(SUM(${paymentTransactions.amountUsd}), 0)` })
+          .from(paymentTransactions)
+          .where(eq(paymentTransactions.status, 'paid')),
         db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(12),
       ]);
 
@@ -1449,6 +1730,10 @@ async function startServer() {
           confirmedPayments: Number(confirmedPayments[0]?.c ?? 0),
           expiredSponsorships: Number(expiredSponsorships[0]?.c ?? 0),
           sponsorshipRevenueUsd: Number(revenueRow[0]?.total ?? 0),
+          datingMembers: Number(datingMembersRow[0]?.c ?? 0),
+          pendingDatingProfiles: Number(pendingDatingRow[0]?.c ?? 0),
+          activeDatingSubscriptions: Number(activeDatingSubsRow[0]?.c ?? 0),
+          centralRevenueUsd: Number(centralRevenueRow[0]?.total ?? 0),
           openReports: Number(openReports[0]?.c ?? 0),
         },
         recentLogs,
@@ -1488,7 +1773,7 @@ async function startServer() {
         .orderBy(desc(users.createdAt))
         .limit(300);
 
-      res.json({ users: rows });
+      res.json({ users: rows.map(toPublicUser) });
     } catch {
       res.status(500).json({ error: 'Failed to load users.' });
     }
@@ -1496,7 +1781,11 @@ async function startServer() {
 
   app.get('/api/admin/users/:id', requireAdminPerm('manage_users'), async (req, res) => {
     try {
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid user ID.' });
+        return;
+      }
       const [userRow] = await db.select().from(users).where(eq(users.id, id)).limit(1);
       if (!userRow) {
         res.status(404).json({ error: 'User not found.' });
@@ -1508,7 +1797,7 @@ async function startServer() {
         db.select().from(houses).where(eq(houses.userId, id)).orderBy(desc(houses.createdAt)),
       ]);
       res.json({
-        user: userRow,
+        user: toPublicUser(userRow),
         jobs: userJobs,
         market: userMarket,
         houses: userHouses,
@@ -1556,7 +1845,7 @@ async function startServer() {
         summary: `${admin.fullName} created user profile for ${fullName}`,
       });
 
-      res.status(201).json({ user: created });
+      res.status(201).json({ user: toPublicUser(created) });
     } catch {
       res.status(500).json({ error: 'Failed to create user.' });
     }
@@ -1565,7 +1854,11 @@ async function startServer() {
   app.put('/api/admin/users/:id', requireAdminPerm('manage_users'), async (req: AuthedAdminRequest, res) => {
     try {
       const admin = req.currentAdmin!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid user ID.' });
+        return;
+      }
       const fullName = cleanText(req.body?.fullName, 80);
       const rawPhone = cleanText(req.body?.phone, 30);
       const rawWhatsapp = cleanText(req.body?.whatsapp, 30) || rawPhone;
@@ -1603,7 +1896,7 @@ async function startServer() {
         summary: `${admin.fullName} edited user ${fullName}`,
       });
 
-      res.json({ user: updated });
+      res.json({ user: toPublicUser(updated) });
     } catch {
       res.status(500).json({ error: 'Failed to update user.' });
     }
@@ -1612,23 +1905,35 @@ async function startServer() {
   app.patch('/api/admin/users/:id/status', requireAdminPerm('manage_users'), async (req: AuthedAdminRequest, res) => {
     try {
       const admin = req.currentAdmin!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid user ID.' });
+        return;
+      }
       const accountStatus = req.body?.accountStatus === 'suspended' ? 'suspended' : 'active';
+
+      const [existing] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+      if (!existing) {
+        res.status(404).json({ error: 'User not found.' });
+        return;
+      }
+
+      const nextVerificationStatus =
+        accountStatus === 'suspended'
+          ? 'suspended'
+          : existing.verificationStatus === 'suspended'
+            ? 'unverified'
+            : existing.verificationStatus;
 
       const [updated] = await db
         .update(users)
         .set({
           accountStatus,
-          verificationStatus: accountStatus === 'suspended' ? 'suspended' : 'unverified',
+          verificationStatus: nextVerificationStatus,
           updatedAt: new Date(),
         })
         .where(eq(users.id, id))
         .returning();
-
-      if (!updated) {
-        res.status(404).json({ error: 'User not found.' });
-        return;
-      }
 
       await notifyUser({
         userId: id,
@@ -1650,7 +1955,7 @@ async function startServer() {
         summary: `${admin.fullName} ${accountStatus === 'suspended' ? 'suspended' : 'reactivated'} ${updated.fullName}`,
       });
 
-      res.json({ user: updated });
+      res.json({ user: toPublicUser(updated) });
     } catch {
       res.status(500).json({ error: 'Failed to change account status.' });
     }
@@ -1659,7 +1964,11 @@ async function startServer() {
   app.patch('/api/admin/users/:id/verification', requireAdminPerm('verify_users'), async (req: AuthedAdminRequest, res) => {
     try {
       const admin = req.currentAdmin!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid user ID.' });
+        return;
+      }
       const verificationStatus = cleanText(req.body?.verificationStatus, 30);
       const verificationNote = cleanText(req.body?.note, 300) || null;
 
@@ -1709,7 +2018,7 @@ async function startServer() {
         summary: `${admin.fullName} set verification for ${updated.fullName} to "${verificationStatus}"`,
       });
 
-      res.json({ user: updated });
+      res.json({ user: toPublicUser(updated) });
     } catch {
       res.status(500).json({ error: 'Failed to update verification status.' });
     }
@@ -1718,7 +2027,11 @@ async function startServer() {
   app.delete('/api/admin/users/:id', requireAdminPerm('manage_users'), async (req: AuthedAdminRequest, res) => {
     try {
       const admin = req.currentAdmin!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid user ID.' });
+        return;
+      }
       const [existing] = await db.select().from(users).where(eq(users.id, id)).limit(1);
       if (!existing) {
         res.status(404).json({ error: 'User not found.' });
@@ -1867,7 +2180,11 @@ async function startServer() {
     try {
       const admin = req.currentAdmin!;
       const type = String(req.params.type);
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid listing ID.' });
+        return;
+      }
       const decision = cleanText(req.body?.decision, 30);
       const reason = cleanText(req.body?.reason, 400) || null;
 
@@ -1967,15 +2284,25 @@ async function startServer() {
     try {
       const admin = req.currentAdmin!;
       const type = String(req.params.type);
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid listing ID.' });
+        return;
+      }
       const title = cleanText(req.body?.title, 120);
       const description = cleanText(req.body?.description, 2500);
       const lifecycleStatus = cleanText(req.body?.lifecycleStatus, 20);
       const expiresAtStr = typeof req.body?.expiresAt === 'string' ? req.body.expiresAt : '';
       const expiresAt = expiresAtStr ? new Date(expiresAtStr) : undefined;
 
+      if (lifecycleStatus && !['active', 'filled', 'sold', 'rented', 'expired'].includes(lifecycleStatus)) {
+        res.status(400).json({ error: 'Invalid lifecycle status.' });
+        return;
+      }
+
+      let updatedRow: { id: number } | undefined;
       if (type === 'job') {
-        await db
+        [updatedRow] = await db
           .update(jobs)
           .set({
             ...(title ? { title } : {}),
@@ -1984,9 +2311,10 @@ async function startServer() {
             ...(expiresAt && !Number.isNaN(expiresAt.getTime()) ? { expiresAt } : {}),
             updatedAt: new Date(),
           })
-          .where(eq(jobs.id, id));
+          .where(eq(jobs.id, id))
+          .returning({ id: jobs.id });
       } else if (type === 'market') {
-        await db
+        [updatedRow] = await db
           .update(marketItems)
           .set({
             ...(title ? { title } : {}),
@@ -1995,9 +2323,10 @@ async function startServer() {
             ...(expiresAt && !Number.isNaN(expiresAt.getTime()) ? { expiresAt } : {}),
             updatedAt: new Date(),
           })
-          .where(eq(marketItems.id, id));
+          .where(eq(marketItems.id, id))
+          .returning({ id: marketItems.id });
       } else if (type === 'house') {
-        await db
+        [updatedRow] = await db
           .update(houses)
           .set({
             ...(title ? { title } : {}),
@@ -2006,9 +2335,15 @@ async function startServer() {
             ...(expiresAt && !Number.isNaN(expiresAt.getTime()) ? { expiresAt } : {}),
             updatedAt: new Date(),
           })
-          .where(eq(houses.id, id));
+          .where(eq(houses.id, id))
+          .returning({ id: houses.id });
       } else {
         res.status(400).json({ error: 'Invalid listing type.' });
+        return;
+      }
+
+      if (!updatedRow) {
+        res.status(404).json({ error: 'Listing not found.' });
         return;
       }
 
@@ -2066,16 +2401,26 @@ async function startServer() {
     try {
       const admin = req.currentAdmin!;
       const type = String(req.params.type);
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid listing ID.' });
+        return;
+      }
 
+      let deletedRow: { id: number } | undefined;
       if (type === 'job') {
-        await db.delete(jobs).where(eq(jobs.id, id));
+        [deletedRow] = await db.delete(jobs).where(eq(jobs.id, id)).returning({ id: jobs.id });
       } else if (type === 'market') {
-        await db.delete(marketItems).where(eq(marketItems.id, id));
+        [deletedRow] = await db.delete(marketItems).where(eq(marketItems.id, id)).returning({ id: marketItems.id });
       } else if (type === 'house') {
-        await db.delete(houses).where(eq(houses.id, id));
+        [deletedRow] = await db.delete(houses).where(eq(houses.id, id)).returning({ id: houses.id });
       } else {
         res.status(400).json({ error: 'Invalid listing type.' });
+        return;
+      }
+
+      if (!deletedRow) {
+        res.status(404).json({ error: 'Listing not found.' });
         return;
       }
 
@@ -2208,7 +2553,11 @@ async function startServer() {
 
   app.put('/api/admin/sponsorship-plans/:id', requireAdminPerm('manage_sponsorships'), async (req: AuthedAdminRequest, res) => {
     try {
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid sponsorship plan ID.' });
+        return;
+      }
       const name = cleanText(req.body?.name, 60);
       const durationDays = Number(req.body?.durationDays);
       const priceUsd = Number(req.body?.priceUsd);
@@ -2238,7 +2587,11 @@ async function startServer() {
   app.patch('/api/admin/payments/:id', requireAdminPerm('manage_payments'), async (req: AuthedAdminRequest, res) => {
     try {
       const admin = req.currentAdmin!;
-      const paymentId = Number(req.params.id);
+      const paymentId = parsePositiveId(req.params.id);
+      if (!paymentId) {
+        res.status(400).json({ error: 'Invalid payment ID.' });
+        return;
+      }
       const action = req.body?.action === 'confirm' ? 'confirm' : req.body?.action === 'reject' ? 'reject' : null;
       const adminNote = cleanText(req.body?.adminNote, 300) || null;
 
@@ -2272,6 +2625,11 @@ async function startServer() {
           })
           .where(eq(sponsorshipPayments.id, paymentId))
           .returning();
+
+        await db
+          .update(paymentTransactions)
+          .set({ status: 'failed', adminNote, confirmedByAdminId: admin.id, updatedAt: new Date() })
+          .where(sql`(${paymentTransactions.metadataJson}->>'legacySponsorshipPaymentId')::int = ${paymentId}`);
 
         await notifyUser({
           userId: payment.userId,
@@ -2309,6 +2667,17 @@ async function startServer() {
             expiresAt,
           })
           .where(eq(sponsorshipPayments.id, paymentId));
+
+        await tx
+          .update(paymentTransactions)
+          .set({
+            status: 'paid',
+            adminNote,
+            confirmedByAdminId: admin.id,
+            paidAt: startsAt,
+            updatedAt: startsAt,
+          })
+          .where(sql`(${paymentTransactions.metadataJson}->>'legacySponsorshipPaymentId')::int = ${paymentId}`);
 
         if (payment.listingType === 'job') {
           await tx
@@ -2387,7 +2756,11 @@ async function startServer() {
   app.delete('/api/admin/categories/:id', requireAdminPerm('manage_categories'), async (req: AuthedAdminRequest, res) => {
     try {
       const admin = req.currentAdmin!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid category ID.' });
+        return;
+      }
       const [deleted] = await db.delete(categories).where(eq(categories.id, id)).returning();
       if (!deleted) {
         res.status(404).json({ error: 'Category not found.' });
@@ -2419,7 +2792,11 @@ async function startServer() {
   app.patch('/api/admin/reports/:id', requireAdminPerm('manage_reports'), async (req: AuthedAdminRequest, res) => {
     try {
       const admin = req.currentAdmin!;
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid report ID.' });
+        return;
+      }
       const status = cleanText(req.body?.status, 20);
       const resolutionNote = cleanText(req.body?.resolutionNote, 300) || null;
       if (!['open', 'resolved', 'dismissed'].includes(status)) {
@@ -2551,7 +2928,11 @@ async function startServer() {
         return;
       }
 
-      const id = Number(req.params.id);
+      const id = parsePositiveId(req.params.id);
+      if (!id) {
+        res.status(400).json({ error: 'Invalid administrator ID.' });
+        return;
+      }
       if (id === actor.id && req.body?.isActive === false) {
         res.status(400).json({ error: 'You cannot deactivate your own Super Admin account.' });
         return;
@@ -2669,16 +3050,29 @@ async function startServer() {
   app.get('/api/admin/export-backup', requireAdminPerm('manage_settings'), async (req: AuthedAdminRequest, res) => {
     try {
       const admin = req.currentAdmin!;
-      const [allUsers, allJobs, allMarket, allHouses, allPayments, allReports, allCategories] =
-        await Promise.all([
-          db.select().from(users),
-          db.select().from(jobs),
-          db.select().from(marketItems),
-          db.select().from(houses),
-          db.select().from(sponsorshipPayments),
-          db.select().from(reports),
-          db.select().from(categories),
-        ]);
+      const [
+        allUsers,
+        allJobs,
+        allMarket,
+        allHouses,
+        allPayments,
+        allCentralTx,
+        allDatingProfiles,
+        allDatingSubs,
+        allReports,
+        allCategories,
+      ] = await Promise.all([
+        db.select().from(users),
+        db.select().from(jobs),
+        db.select().from(marketItems),
+        db.select().from(houses),
+        db.select().from(sponsorshipPayments),
+        db.select().from(paymentTransactions),
+        db.select().from(datingProfiles),
+        db.select().from(datingSubscriptions),
+        db.select().from(reports),
+        db.select().from(categories),
+      ]);
 
       await logAudit({
         actorType: 'admin',
@@ -2691,17 +3085,26 @@ async function startServer() {
       res.setHeader('Content-Disposition', `attachment; filename="market_jobs_backup_${Date.now()}.json"`);
       res.json({
         exportedAt: new Date().toISOString(),
-        users: allUsers,
+        users: allUsers.map(toPublicUser),
         jobs: allJobs,
         marketItems: allMarket,
         houses: allHouses,
         sponsorshipPayments: allPayments,
+        paymentTransactions: allCentralTx,
+        datingProfiles: allDatingProfiles,
+        datingSubscriptions: allDatingSubs,
         reports: allReports,
         categories: allCategories,
       });
     } catch {
       res.status(500).json({ error: 'Failed to export backup.' });
     }
+  });
+
+  // Register Dating/Singles & Central Payment System Routes
+  registerDatingAndPaymentRoutes(app, {
+    requireUserAuth: requireUserAuth as express.RequestHandler,
+    requireAdminPerm: (perm) => requireAdminPerm(perm) as express.RequestHandler,
   });
 
   if (process.env.NODE_ENV !== 'production') {

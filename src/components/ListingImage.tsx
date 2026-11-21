@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Home, ShoppingBag } from 'lucide-react';
+import { resolveAssetUrl } from '../utils/assetResolver';
 
 interface ListingImageProps {
   src?: string;
@@ -11,8 +12,9 @@ interface ListingImageProps {
 
 export function ListingImage({ src, alt, variant, className = '', photoCount = 0 }: ListingImageProps) {
   const [failed, setFailed] = useState(false);
+  const resolvedSrc = resolveAssetUrl(src);
 
-  if (!src || failed) {
+  if (!resolvedSrc || failed) {
     return (
       <div
         className={`relative aspect-[4/3] w-full overflow-hidden bg-slate-100 flex flex-col items-center justify-center text-slate-400 select-none ${className}`}
@@ -30,7 +32,7 @@ export function ListingImage({ src, alt, variant, className = '', photoCount = 0
   return (
     <div className={`relative aspect-[4/3] w-full overflow-hidden bg-slate-100 ${className}`}>
       <img
-        src={src}
+        src={resolvedSrc}
         alt={alt}
         loading="lazy"
         referrerPolicy="no-referrer"

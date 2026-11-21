@@ -4,6 +4,9 @@ import {
   admins,
   auditLogs,
   categories,
+  datingPackages,
+  datingProfiles,
+  datingSubscriptions,
   houses,
   jobs,
   marketItems,
@@ -20,6 +23,7 @@ export const ALL_PERMISSIONS = [
   'manage_users',
   'verify_users',
   'moderate_ads',
+  'manage_dating',
   'manage_sponsorships',
   'manage_payments',
   'manage_reports',
@@ -33,7 +37,7 @@ export type AdminPermission = (typeof ALL_PERMISSIONS)[number];
 
 export const ROLE_DEFAULT_PERMISSIONS: Record<string, AdminPermission[]> = {
   super_admin: [...ALL_PERMISSIONS],
-  moderator: ['moderate_ads', 'manage_reports'],
+  moderator: ['moderate_ads', 'manage_reports', 'manage_dating'],
   user_manager: ['manage_users', 'verify_users'],
   sponsorship_manager: ['manage_sponsorships', 'manage_payments'],
 };
@@ -99,6 +103,46 @@ async function runInitialSeed(): Promise<void> {
     ]);
   }
 
+  // 2b. Seed dating packages if empty
+  const existingDatingPkgs = await db.select({ value: count() }).from(datingPackages);
+  if ((existingDatingPkgs[0]?.value ?? 0) === 0) {
+    await db.insert(datingPackages).values([
+      {
+        slug: 'starter_3',
+        name: 'Starter Connect (1–3 Singles)',
+        priceUsd: 6,
+        minSelections: 1,
+        maxSelections: 3,
+        durationDays: null,
+        isUnlimited: false,
+        description: 'Choose and connect on WhatsApp with 1 to 3 verified singles.',
+        isActive: true,
+      },
+      {
+        slug: 'standard_15',
+        name: 'Standard Connect (4–15 Singles)',
+        priceUsd: 10,
+        minSelections: 4,
+        maxSelections: 15,
+        durationDays: null,
+        isUnlimited: false,
+        description: 'Choose and connect on WhatsApp with up to 15 eligible singles.',
+        isActive: true,
+      },
+      {
+        slug: 'unlimited_30d',
+        name: 'Unlimited 30-Day Pass',
+        priceUsd: 20,
+        minSelections: 1,
+        maxSelections: null,
+        durationDays: 30,
+        isUnlimited: true,
+        description: 'Unlimited access to all eligible singles for 30 days.',
+        isActive: true,
+      },
+    ]);
+  }
+
   // 3. Seed platform settings
   await db
     .insert(platformSettings)
@@ -106,11 +150,23 @@ async function runInitialSeed(): Promise<void> {
       {
         key: 'payment_instructions',
         value:
-          'Pay via EcoCash, InnBucks, or Bank Transfer and enter your exact transaction reference below. Sponsorship goes live once an administrator confirms your payment.',
+          'Pay securely with Paynow Zimbabwe or PayPal, or use EcoCash / InnBucks / Bank Transfer reference below.',
       },
       {
         key: 'listing_expiry_days',
         value: '30',
+      },
+      {
+        key: 'dating_enabled',
+        value: 'true',
+      },
+      {
+        key: 'dating_require_approval',
+        value: 'true',
+      },
+      {
+        key: 'dating_allow_hiv_disclosure',
+        value: 'true',
       },
     ])
     .onConflictDoNothing();
@@ -365,6 +421,170 @@ async function runInitialSeed(): Promise<void> {
       },
     ]);
   }
+
+  // 6. Seed sample Zimbabwe singles profiles if empty
+  const existingSingles = await db.select({ value: count() }).from(datingProfiles);
+  if ((existingSingles[0]?.value ?? 0) === 0) {
+    const sampleAccounts = [
+      {
+        uid: 'seed-single-f1',
+        email: 'rutendo.singles@marketjobs.co.zw',
+        fullName: 'Rutendo M.',
+        phone: '+263773104821',
+        whatsapp: '+263773104821',
+        city: 'Harare',
+        datingOptIn: 'yes',
+        verificationStatus: 'verified',
+        accountStatus: 'active',
+      },
+      {
+        uid: 'seed-single-m1',
+        email: 'tatenda.singles@marketjobs.co.zw',
+        fullName: 'Tatenda K.',
+        phone: '+263774219305',
+        whatsapp: '+263774219305',
+        city: 'Harare',
+        datingOptIn: 'yes',
+        verificationStatus: 'verified',
+        accountStatus: 'active',
+      },
+      {
+        uid: 'seed-single-f2',
+        email: 'nomsa.singles@marketjobs.co.zw',
+        fullName: 'Nomsa N.',
+        phone: '+263719842110',
+        whatsapp: '+263719842110',
+        city: 'Bulawayo',
+        datingOptIn: 'yes',
+        verificationStatus: 'verified',
+        accountStatus: 'active',
+      },
+      {
+        uid: 'seed-single-m2',
+        email: 'farai.singles@marketjobs.co.zw',
+        fullName: 'Farai M.',
+        phone: '+263782550192',
+        whatsapp: '+263782550192',
+        city: 'Bulawayo',
+        datingOptIn: 'yes',
+        verificationStatus: 'unverified',
+        accountStatus: 'active',
+      },
+    ];
+
+    for (const acc of sampleAccounts) {
+      await db.insert(users).values(acc).onConflictDoNothing();
+    }
+
+    const seededUsers = await db
+      .select()
+      .from(users)
+      .where(
+        or(
+          eq(users.uid, 'seed-single-f1'),
+          eq(users.uid, 'seed-single-m1'),
+          eq(users.uid, 'seed-single-f2'),
+          eq(users.uid, 'seed-single-m2')
+        )
+      );
+
+    const byUid = new Map<string, typeof users.$inferSelect>(seededUsers.map((u) => [u.uid, u]));
+    const f1 = byUid.get('seed-single-f1');
+    const m1 = byUid.get('seed-single-m1');
+    const f2 = byUid.get('seed-single-f2');
+    const m2 = byUid.get('seed-single-m2');
+
+    const profilesToInsert = [
+      f1 && {
+        userId: f1.id,
+        displayName: 'Rutendo',
+        age: 28,
+        gender: 'female',
+        country: 'Zimbabwe',
+        city: 'Harare',
+        suburb: 'Avondale',
+        whatsapp: f1.whatsapp,
+        photo: '/src/assets/images/single_woman_harare_1795273489530.jpg',
+        childrenCount: 0,
+        hivStatus: 'Negative',
+        shareHivWithSubscribers: true,
+        description:
+          'Warmhearted accountant in Harare who loves Sunday church, baking, and quiet family time. Looking for a respectful partner ready for commitment.',
+        intention: 'marriage',
+        termsAccepted: true,
+        approvalStatus: 'approved',
+        isVisible: true,
+        isSuspended: false,
+      },
+      m1 && {
+        userId: m1.id,
+        displayName: 'Tatenda',
+        age: 31,
+        gender: 'male',
+        country: 'Zimbabwe',
+        city: 'Harare',
+        suburb: 'Mount Pleasant',
+        whatsapp: m1.whatsapp,
+        photo: '/src/assets/images/single_man_harare_1795273488592.jpg',
+        childrenCount: 0,
+        hivStatus: 'Negative',
+        shareHivWithSubscribers: true,
+        description:
+          'Civil engineer based in Harare. Value honesty, kindness, and building a calm home together.',
+        intention: 'serious_relationship',
+        termsAccepted: true,
+        approvalStatus: 'approved',
+        isVisible: true,
+        isSuspended: false,
+      },
+      f2 && {
+        userId: f2.id,
+        displayName: 'Nomsa',
+        age: 30,
+        gender: 'female',
+        country: 'Zimbabwe',
+        city: 'Bulawayo',
+        suburb: 'Suburbs',
+        whatsapp: f2.whatsapp,
+        photo: '/src/assets/images/single_woman_bulawayo_1795273489230.jpg',
+        childrenCount: 1,
+        hivStatus: 'Prefer not to disclose',
+        shareHivWithSubscribers: false,
+        description:
+          'Boutique entrepreneur in Bulawayo. Family-focused, optimistic, and hoping to meet a genuine gentleman for a serious relationship.',
+        intention: 'serious_relationship',
+        termsAccepted: true,
+        approvalStatus: 'approved',
+        isVisible: true,
+        isSuspended: false,
+      },
+      m2 && {
+        userId: m2.id,
+        displayName: 'Farai',
+        age: 34,
+        gender: 'male',
+        country: 'Zimbabwe',
+        city: 'Bulawayo',
+        suburb: 'Hillside',
+        whatsapp: m2.whatsapp,
+        photo: '/src/assets/images/single_man_bulawayo_1795273488623.jpg',
+        childrenCount: 1,
+        hivStatus: 'Prefer not to disclose',
+        shareHivWithSubscribers: false,
+        description:
+          'Logistics coordinator in Hillside. Enjoy outdoor braais, reading, and thoughtful conversation.',
+        intention: 'marriage',
+        termsAccepted: true,
+        approvalStatus: 'approved',
+        isVisible: true,
+        isSuspended: false,
+      },
+    ].filter((p): p is NonNullable<typeof p> => Boolean(p));
+
+    if (profilesToInsert.length > 0) {
+      await db.insert(datingProfiles).values(profilesToInsert).onConflictDoNothing();
+    }
+  }
 }
 
 export async function expireStaleSponsorships(): Promise<void> {
@@ -391,6 +611,44 @@ export async function expireStaleSponsorships(): Promise<void> {
   } catch (error) {
     console.error('Failed to expire stale sponsorships:', error);
   }
+}
+
+export async function expireStaleDatingSubscriptions(): Promise<void> {
+  const now = new Date();
+  try {
+    await db
+      .update(datingSubscriptions)
+      .set({ status: 'expired' })
+      .where(
+        and(
+          eq(datingSubscriptions.status, 'active'),
+          sql`${datingSubscriptions.expiresAt} IS NOT NULL`,
+          lte(datingSubscriptions.expiresAt, now)
+        )
+      );
+  } catch (error) {
+    console.error('Failed to expire dating subscriptions:', error);
+  }
+}
+
+export async function getActiveDatingSubscription(userId: number) {
+  await expireStaleDatingSubscriptions();
+  const [sub] = await db
+    .select()
+    .from(datingSubscriptions)
+    .where(and(eq(datingSubscriptions.userId, userId), eq(datingSubscriptions.status, 'active')))
+    .orderBy(desc(datingSubscriptions.createdAt))
+    .limit(1);
+
+  if (!sub) return null;
+  if (!sub.isUnlimited && sub.selectionLimit !== null && sub.selectionsUsed >= sub.selectionLimit) {
+    await db
+      .update(datingSubscriptions)
+      .set({ status: 'exhausted' })
+      .where(eq(datingSubscriptions.id, sub.id));
+    return null;
+  }
+  return sub;
 }
 
 export async function logAudit(params: {
@@ -421,7 +679,7 @@ export async function notifyUser(params: {
   userId: number;
   title: string;
   message: string;
-  category: 'approval' | 'verification' | 'sponsorship' | 'account';
+  category: 'approval' | 'verification' | 'sponsorship' | 'account' | 'dating' | 'payment';
 }): Promise<void> {
   try {
     await db.insert(notifications).values({

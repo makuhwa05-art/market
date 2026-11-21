@@ -8,17 +8,20 @@ import {
   serial,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
   uid: text('uid').notNull().unique(),
   email: text('email').notNull(),
+  passwordHash: text('password_hash'),
   fullName: text('full_name').notNull(),
   phone: text('phone').notNull().default(''),
   whatsapp: text('whatsapp').notNull().default(''),
   city: text('city').notNull().default('Harare'),
   avatar: text('avatar'),
+  datingOptIn: text('dating_opt_in').notNull().default('unset'), // 'unset' | 'yes' | 'no'
   verificationStatus: text('verification_status').notNull().default('unverified'),
   verificationNote: text('verification_note'),
   accountStatus: text('account_status').notNull().default('active'),
@@ -135,9 +138,134 @@ export const sponsorshipPayments = pgTable('sponsorship_payments', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const datingPackages = pgTable('dating_packages', {
+  id: serial('id').primaryKey(),
+  slug: text('slug').notNull().unique(),
+  name: text('name').notNull(),
+  priceUsd: doublePrecision('price_usd').notNull(),
+  minSelections: integer('min_selections').notNull().default(1),
+  maxSelections: integer('max_selections'), // null means unlimited
+  durationDays: integer('duration_days'), // null means limit-based until used
+  isUnlimited: boolean('is_unlimited').notNull().default(false),
+  description: text('description').notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+});
+
+export const datingProfiles = pgTable('dating_profiles', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .references(() => users.id, { onDelete: 'cascade' })
+    .notNull()
+    .unique(),
+  displayName: text('display_name').notNull(),
+  age: integer('age').notNull(),
+  gender: text('gender').notNull(), // 'male' | 'female'
+  country: text('country').notNull().default('Zimbabwe'),
+  city: text('city').notNull(),
+  suburb: text('suburb').notNull(),
+  whatsapp: text('whatsapp').notNull(),
+  photo: text('photo').notNull(),
+  childrenCount: integer('children_count'),
+  hivStatus: text('hiv_status').notNull().default('Prefer not to disclose'),
+  shareHivWithSubscribers: boolean('share_hiv_with_subscribers').notNull().default(false),
+  description: text('description').notNull(),
+  intention: text('intention').notNull().default('serious_relationship'), // 'dating' | 'serious_relationship' | 'marriage'
+  termsAccepted: boolean('terms_accepted').notNull().default(false),
+  approvalStatus: text('approval_status').notNull().default('pending'), // 'pending' | 'approved' | 'rejected'
+  moderationReason: text('moderation_reason'),
+  isVisible: boolean('is_visible').notNull().default(true),
+  isSuspended: boolean('is_suspended').notNull().default(false),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const paymentTransactions = pgTable('payment_transactions', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .references(() => users.id, { onDelete: 'cascade' })
+    .notNull(),
+  featureType: text('feature_type').notNull(), // 'dating_package' | 'sponsored_job' | 'sponsored_market' | 'sponsored_house'
+  targetId: integer('target_id').notNull(),
+  targetTitle: text('target_title').notNull(),
+  planOrPackageId: integer('plan_or_package_id'),
+  gateway: text('gateway').notNull(), // 'paynow' | 'paypal' | 'manual'
+  amountUsd: doublePrecision('amount_usd').notNull(),
+  currency: text('currency').notNull().default('USD'),
+  status: text('status').notNull().default('pending'), // 'pending' | 'paid' | 'failed' | 'refunded'
+  merchantReference: text('merchant_reference').notNull().unique(),
+  gatewayReference: text('gateway_reference'),
+  gatewayCaptureId: text('gateway_capture_id'),
+  pollUrl: text('poll_url'),
+  checkoutUrl: text('checkout_url'),
+  metadataJson: jsonb('metadata_json').$type<Record<string, unknown>>().notNull().default({}),
+  adminNote: text('admin_note'),
+  refundedAmountUsd: doublePrecision('refunded_amount_usd'),
+  refundReason: text('refund_reason'),
+  confirmedByAdminId: integer('confirmed_by_admin_id'),
+  paidAt: timestamp('paid_at'),
+  refundedAt: timestamp('refunded_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const datingSubscriptions = pgTable('dating_subscriptions', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .references(() => users.id, { onDelete: 'cascade' })
+    .notNull(),
+  packageId: integer('package_id')
+    .references(() => datingPackages.id)
+    .notNull(),
+  packageName: text('package_name').notNull(),
+  amountUsd: doublePrecision('amount_usd').notNull(),
+  selectionLimit: integer('selection_limit'), // null for 30-day unlimited
+  selectionsUsed: integer('selections_used').notNull().default(0),
+  isUnlimited: boolean('is_unlimited').notNull().default(false),
+  status: text('status').notNull().default('active'), // 'active' | 'exhausted' | 'expired' | 'refunded'
+  paymentTransactionId: integer('payment_transaction_id').references(() => paymentTransactions.id),
+  startsAt: timestamp('starts_at').defaultNow().notNull(),
+  expiresAt: timestamp('expires_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const datingSelections = pgTable(
+  'dating_selections',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    subscriptionId: integer('subscription_id')
+      .references(() => datingSubscriptions.id, { onDelete: 'cascade' })
+      .notNull(),
+    targetProfileId: integer('target_profile_id')
+      .references(() => datingProfiles.id, { onDelete: 'cascade' })
+      .notNull(),
+    targetUserId: integer('target_user_id').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex('dating_sel_sub_target_idx').on(table.subscriptionId, table.targetProfileId)]
+);
+
+export const datingBlocks = pgTable(
+  'dating_blocks',
+  {
+    id: serial('id').primaryKey(),
+    blockerUserId: integer('blocker_user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    blockedProfileId: integer('blocked_profile_id')
+      .references(() => datingProfiles.id, { onDelete: 'cascade' })
+      .notNull(),
+    blockedUserId: integer('blocked_user_id').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex('dating_blocks_pair_idx').on(table.blockerUserId, table.blockedProfileId)]
+);
+
 export const reports = pgTable('reports', {
   id: serial('id').primaryKey(),
-  listingType: text('listing_type').notNull(),
+  listingType: text('listing_type').notNull(), // 'job' | 'market' | 'house' | 'dating'
   listingId: integer('listing_id').notNull(),
   listingTitle: text('listing_title').notNull(),
   reporterUserId: integer('reporter_user_id'),
@@ -156,7 +284,7 @@ export const notifications = pgTable('notifications', {
     .notNull(),
   title: text('title').notNull(),
   message: text('message').notNull(),
-  category: text('category').notNull(), // 'approval' | 'verification' | 'sponsorship' | 'account'
+  category: text('category').notNull(), // 'approval' | 'verification' | 'sponsorship' | 'account' | 'dating' | 'payment'
   isRead: boolean('is_read').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
@@ -190,11 +318,17 @@ export const platformSettings = pgTable('platform_settings', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
-export const usersRelations = relations(users, ({ many }) => ({
+export const usersRelations = relations(users, ({ many, one }) => ({
   jobs: many(jobs),
   marketItems: many(marketItems),
   houses: many(houses),
   sponsorshipPayments: many(sponsorshipPayments),
+  paymentTransactions: many(paymentTransactions),
+  datingSubscriptions: many(datingSubscriptions),
+  datingProfile: one(datingProfiles, {
+    fields: [users.id],
+    references: [datingProfiles.userId],
+  }),
   notifications: many(notifications),
 }));
 
@@ -228,6 +362,25 @@ export const sponsorshipPaymentsRelations = relations(sponsorshipPayments, ({ on
     fields: [sponsorshipPayments.planId],
     references: [sponsorshipPlans.id],
   }),
+}));
+
+export const datingProfilesRelations = relations(datingProfiles, ({ one }) => ({
+  user: one(users, {
+    fields: [datingProfiles.userId],
+    references: [users.id],
+  }),
+}));
+
+export const datingSubscriptionsRelations = relations(datingSubscriptions, ({ one, many }) => ({
+  user: one(users, {
+    fields: [datingSubscriptions.userId],
+    references: [users.id],
+  }),
+  pkg: one(datingPackages, {
+    fields: [datingSubscriptions.packageId],
+    references: [datingPackages.id],
+  }),
+  selections: many(datingSelections),
 }));
 
 export const notificationsRelations = relations(notifications, ({ one }) => ({

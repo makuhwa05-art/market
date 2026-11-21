@@ -52,6 +52,22 @@ export function buildWhatsAppUrl(phone: string, message: string): string {
   return `https://wa.me/${digitsOnly}?text=${encodeURIComponent(message)}`;
 }
 
+export function buildDirectWhatsAppUrl(phone: string, message: string): string {
+  const cleaned = String(phone || '').replace(/[^\d+]/g, '');
+  const digitsOnly = cleaned.startsWith('+')
+    ? cleaned.slice(1)
+    : normalizeZimbabwePhone(cleaned).replace(/^\+/, '');
+  return `https://wa.me/${digitsOnly}?text=${encodeURIComponent(message)}`;
+}
+
+export function buildDatingWhatsAppMessage(
+  targetName: string,
+  senderName: string,
+  senderCity: string
+): string {
+  return `Hi ${targetName}, I saw your profile on MARKET & JOBS Zimbabwe Singles (${senderName} from ${senderCity}) and would love to connect and get to know you.`;
+}
+
 export function buildJobWhatsAppMessage(title: string, employer: string, location: string): string {
   return `Hello, I am applying for the ${title} position at ${employer} (${location}) listed on MARKET & JOBS Zimbabwe.`;
 }

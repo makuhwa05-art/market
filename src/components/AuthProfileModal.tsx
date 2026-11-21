@@ -1,15 +1,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  ArrowRight,
   BadgeCheck,
   Bell,
+  Briefcase,
   Camera,
+  Check,
   CheckCheck,
   Clock,
+  Eye,
+  EyeOff,
+  Heart,
+  Home,
   Layers,
   LogOut,
   Megaphone,
   Pencil,
   ShieldAlert,
+  ShieldCheck,
+  ShoppingBag,
   Trash2,
   User as UserIcon,
   X,
@@ -19,6 +28,7 @@ import type {
   HouseListing,
   JobListing,
   MarketListing,
+  PaymentCapabilities,
   SponsorshipPayment,
   SponsorshipPlan,
 } from '../types';
@@ -31,20 +41,25 @@ import {
   isValidZimbabwePhone,
   normalizeZimbabwePhone,
 } from '../utils/whatsapp';
+import { PaymentCheckoutModal } from './PaymentCheckoutModal';
 import type { EditTarget } from './PostModal';
 
 export type AccountModalTab = 'profile' | 'listings' | 'notifications';
+type AuthMode = 'signin' | 'signup';
+type OnboardingStep = 'details' | 'photo' | 'verify' | null;
 
 interface AuthProfileModalProps {
   isOpen: boolean;
   initialTab?: AccountModalTab;
   promptMessage?: string;
   sponsorshipPlans: SponsorshipPlan[];
+  paymentCapabilities?: PaymentCapabilities;
   paymentInstructions: string;
   onClose: () => void;
   onAuthSuccess?: () => void;
   onEditListing?: (target: EditTarget) => void;
   onListingChanged?: () => void;
+  onOpenSingles?: () => void;
 }
 
 const APPROVAL_LABELS: Record<string, { label: string; className: string }> = {
@@ -57,22 +72,69 @@ const APPROVAL_LABELS: Record<string, { label: string; className: string }> = {
   },
 };
 
+function OnboardingStepper({ current }: { current: Exclude<OnboardingStep, null> }) {
+  const steps: Array<{ id: Exclude<OnboardingStep, null>; num: number; label: string }> = [
+    { id: 'details', num: 1, label: 'Details' },
+    { id: 'photo', num: 2, label: 'Profile Photo' },
+    { id: 'verify', num: 3, label: 'Verification' },
+  ];
+  const currentIdx = steps.findIndex((s) => s.id === current);
+
+  return (
+    <div className="grid grid-cols-3 gap-2 pb-1" aria-label="Account setup steps">
+      {steps.map((step, idx) => {
+        const done = idx < currentIdx;
+        const active = idx === currentIdx;
+        return (
+          <div
+            key={step.id}
+            className={`px-2.5 py-2 rounded-lg border text-xs flex items-center gap-2 ${
+              active
+                ? 'border-emerald-700 bg-emerald-50/70 text-emerald-950 font-semibold'
+                : done
+                  ? 'border-emerald-200 bg-emerald-50/30 text-emerald-800 font-medium'
+                  : 'border-slate-200 bg-slate-50 text-slate-500'
+            }`}
+          >
+            <span
+              className={`w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center shrink-0 ${
+                active
+                  ? 'bg-emerald-700 text-white'
+                  : done
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-slate-200 text-slate-600'
+              }`}
+            >
+              {done ? <Check className="w-3 h-3" aria-hidden="true" /> : step.num}
+            </span>
+            <span className="truncate">{step.label}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function AuthProfileModal({
   isOpen,
   initialTab = 'profile',
   promptMessage,
   sponsorshipPlans,
+  paymentCapabilities,
   paymentInstructions,
   onClose,
   onAuthSuccess,
   onEditListing,
   onListingChanged,
+  onOpenSingles,
 }: AuthProfileModalProps) {
   const {
     user,
     notifications,
     unreadCount,
     signInWithGoogle,
+    registerAccount,
+    signInWithCredentials,
     refreshProfile,
     updateUser,
     markNotificationsRead,
@@ -81,14 +143,25 @@ export function AuthProfileModal({
   } = useAuth();
 
   const [tab, setTab] = useState<AccountModalTab>(initialTab);
+  const [authMode, setAuthMode] = useState<AuthMode>('signin');
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(null);
   const [signingIn, setSigningIn] = useState(false);
 
-  // Profile fields
+  // Sign In fields
+  const [loginIdentifier, setLoginIdentifier] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPw, setShowLoginPw] = useState(false);
+
+  // Sign Up / Profile fields
   const [fullName, setFullName] = useState('');
+  const [signupEmail, setSignupEmail] = useState('');
+  const [signupPassword, setSignupPassword] = useState('');
+  const [showSignupPw, setShowSignupPw] = useState(false);
   const [phone, setPhone] = useState('');
   const [whatsapp, setWhatsapp] = useState('');
   const [city, setCity] = useState('Harare');
   const [avatar, setAvatar] = useState<string | null>(null);
+  const [datingOptIn, setDatingOptIn] = useState<'unset' | 'yes' | 'no'>('unset');
   const [avatarInfo, setAvatarInfo] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [verifyingReq, setVerifyingReq] = useState(false);
@@ -108,32 +181,52 @@ export function AuthProfileModal({
     title: string;
   } | null>(null);
   const [selectedPlanId, setSelectedPlanId] = useState<number>(sponsorshipPlans[0]?.id ?? 0);
-  const [paymentMethod, setPaymentMethod] = useState('EcoCash');
-  const [paymentReference, setPaymentReference] = useState('');
-  const [sponsorSubmitting, setSponsorSubmitting] = useState(false);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
 
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setOnboardingStep(null);
+      return;
+    }
     setTab(initialTab);
     setError('');
     setSuccessMsg('');
     setAvatarInfo('');
     setSponsorTarget(null);
+    setCheckoutOpen(false);
     setConfirmDelete(null);
     if (sponsorshipPlans.length > 0 && !selectedPlanId) {
       setSelectedPlanId(sponsorshipPlans[0].id);
     }
-    if (user) {
-      setFullName(user.fullName);
-      setPhone(user.phone);
-      setWhatsapp(user.whatsapp || user.phone);
-      setCity(user.city || 'Harare');
-      setAvatar(user.avatar);
+    if (!user) {
+      setAuthMode('signin');
+      setLoginIdentifier('');
+      setLoginPassword('');
+      setSignupEmail('');
+      setSignupPassword('');
+      setFullName('');
+      setPhone('');
+      setWhatsapp('');
+      setCity('Harare');
+      setAvatar(null);
+      setDatingOptIn('unset');
     }
-  }, [isOpen, initialTab, user, sponsorshipPlans, selectedPlanId]);
+    // Only reset modal UI state when opening/closing or switching initial tab
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialTab]);
+
+  useEffect(() => {
+    if (!isOpen || !user) return;
+    setFullName(user.fullName);
+    setPhone(user.phone);
+    setWhatsapp(user.whatsapp || user.phone);
+    setCity(user.city || 'Harare');
+    setAvatar(user.avatar);
+    setDatingOptIn(user.datingOptIn ?? 'unset');
+  }, [isOpen, user]);
 
   const loadMyListings = useCallback(async () => {
     if (!user) return;
@@ -155,23 +248,98 @@ export function AuthProfileModal({
   }, [user, authHeaders]);
 
   useEffect(() => {
-    if (isOpen && user && tab === 'listings') {
+    if (isOpen && user && tab === 'listings' && !onboardingStep) {
       loadMyListings();
     }
-  }, [isOpen, user, tab, loadMyListings]);
+  }, [isOpen, user, tab, onboardingStep, loadMyListings]);
 
   if (!isOpen) return null;
 
-  const handleGoogleSignIn = async () => {
+  const handleCredentialSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
     setError('');
+    setSuccessMsg('');
+    if (!loginIdentifier.trim() || !loginPassword) {
+      setError('Please enter your email or phone number and password.');
+      return;
+    }
+
     setSigningIn(true);
     try {
-      const profile = await signInWithGoogle();
-      if (profile && isValidZimbabwePhone(profile.whatsapp)) {
+      const profile = await signInWithCredentials(loginIdentifier.trim(), loginPassword);
+      if (isValidZimbabwePhone(profile.whatsapp)) {
         onAuthSuccess?.();
         onClose();
       } else {
-        setSuccessMsg('Signed in! Please complete your Zimbabwe phone, WhatsApp, and city below.');
+        setOnboardingStep('details');
+        setSuccessMsg('Signed in! Please complete your profile details.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sign in failed.');
+    } finally {
+      setSigningIn(false);
+    }
+  };
+
+  const handleStage1Register = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSuccessMsg('');
+
+    if (fullName.trim().length < 2) {
+      setError('Please enter your full name (at least 2 characters).');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(signupEmail.trim())) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+    if (signupPassword.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+    const targetWa = whatsapp.trim() || phone.trim();
+    if (!isValidZimbabwePhone(phone) || !isValidZimbabwePhone(targetWa)) {
+      setError('Enter valid Zimbabwe phone and WhatsApp numbers (e.g. 0771234567).');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await registerAccount({
+        fullName: fullName.trim(),
+        email: signupEmail.trim(),
+        password: signupPassword,
+        phone: phone.trim(),
+        whatsapp: targetWa,
+        city,
+        datingOptIn,
+      });
+      setOnboardingStep('photo');
+      setSuccessMsg('Account created! Next, upload your profile photo.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create your account.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setError('');
+    setSuccessMsg('');
+    setSigningIn(true);
+    try {
+      const profile = await signInWithGoogle();
+      if (!profile) return;
+      if (!isValidZimbabwePhone(profile.whatsapp)) {
+        setOnboardingStep('details');
+        setSuccessMsg('Signed in with Google! Complete your Zimbabwe phone, WhatsApp, and city below.');
+      } else if (authMode === 'signup' && !profile.avatar) {
+        setOnboardingStep('photo');
+        setSuccessMsg('Account connected! Upload a profile photo or continue.');
+      } else {
+        onAuthSuccess?.();
+        onClose();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Google sign-in failed.');
@@ -198,7 +366,10 @@ export function AuthProfileModal({
     }
   };
 
-  const handleSaveProfile = async (e: React.FormEvent) => {
+  const handleSaveProfile = async (
+    e: React.FormEvent,
+    options?: { advanceTo?: OnboardingStep; closeOnSuccess?: boolean }
+  ) => {
     e.preventDefault();
     setError('');
     setSuccessMsg('');
@@ -226,6 +397,7 @@ export function AuthProfileModal({
           whatsapp: targetWa,
           city,
           avatar,
+          datingOptIn,
         }),
       });
       const data = await res.json();
@@ -234,8 +406,20 @@ export function AuthProfileModal({
         return;
       }
       updateUser(data.user);
-      setSuccessMsg('Profile saved.');
-      onAuthSuccess?.();
+      if (options?.advanceTo) {
+        setOnboardingStep(options.advanceTo);
+        setSuccessMsg(
+          options.advanceTo === 'photo'
+            ? 'Details saved! Now upload your profile photo.'
+            : 'Profile photo saved! You can request verification below or start right away.'
+        );
+      } else {
+        setSuccessMsg('Profile saved.');
+        onAuthSuccess?.();
+        if (options?.closeOnSuccess) {
+          onClose();
+        }
+      }
     } catch {
       setError('Network error while saving profile.');
     } finally {
@@ -264,6 +448,12 @@ export function AuthProfileModal({
     } finally {
       setVerifyingReq(false);
     }
+  };
+
+  const handleFinishOnboarding = () => {
+    setOnboardingStep(null);
+    onAuthSuccess?.();
+    onClose();
   };
 
   const handleLifecycleChange = async (
@@ -304,53 +494,21 @@ export function AuthProfileModal({
     }
   };
 
-  const handleSubmitSponsorship = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!sponsorTarget) return;
-    setError('');
-    setSuccessMsg('');
-    const planId = selectedPlanId || sponsorshipPlans[0]?.id;
-    if (!planId) {
-      setError('No sponsorship plans are currently active.');
-      return;
-    }
-    if (paymentReference.trim().length < 3) {
-      setError('Enter the transaction reference from your payment.');
-      return;
-    }
-
-    setSponsorSubmitting(true);
-    try {
-      const res = await fetch('/api/sponsorships/request', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({
-          listingType: sponsorTarget.listingType,
-          listingId: sponsorTarget.listingId,
-          planId,
-          paymentMethod,
-          paymentReference: paymentReference.trim(),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || 'Could not submit sponsorship request.');
-        return;
-      }
-      setSponsorTarget(null);
-      setPaymentReference('');
-      setSuccessMsg(
-        'Sponsorship payment reference submitted! An administrator will confirm your payment to activate SPONSORED placement.'
-      );
-      loadMyListings();
-    } catch {
-      setError('Network error submitting sponsorship.');
-    } finally {
-      setSponsorSubmitting(false);
-    }
-  };
-
   const totalMyAds = myJobs.length + myMarket.length + myHouses.length;
+  const activeSponsorPlan =
+    sponsorshipPlans.find((p) => p.id === selectedPlanId) ?? sponsorshipPlans[0] ?? null;
+
+  const modalTitle = !user
+    ? authMode === 'signin'
+      ? 'Sign In to MARKET & JOBS'
+      : 'Create Account — Step 1 of 3'
+    : onboardingStep === 'details'
+      ? 'Complete Your Details — Step 1 of 3'
+      : onboardingStep === 'photo'
+        ? 'Upload Profile Photo — Step 2 of 3'
+        : onboardingStep === 'verify'
+          ? 'Verification & All Tabs Ready — Step 3 of 3'
+          : 'Your Account';
 
   return (
     <div
@@ -366,9 +524,7 @@ export function AuthProfileModal({
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200">
           <div className="flex items-center gap-2">
-            <h2 className="text-base font-bold text-slate-900">
-              {user ? 'Your Account' : 'Sign In to MARKET & JOBS'}
-            </h2>
+            <h2 className="text-base font-bold text-slate-900">{modalTitle}</h2>
             {user?.verificationStatus === 'verified' && (
               <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
                 <BadgeCheck className="w-3.5 h-3.5" aria-hidden="true" />
@@ -386,8 +542,8 @@ export function AuthProfileModal({
           </button>
         </div>
 
-        {/* Account Navigation Tabs (when signed in) */}
-        {user && (
+        {/* Account Navigation Tabs (only when signed in and not inside active onboarding steps) */}
+        {user && !onboardingStep && (
           <div className="px-5 pt-2.5 border-b border-slate-200 flex items-center gap-4 overflow-x-auto">
             <button
               type="button"
@@ -463,15 +619,252 @@ export function AuthProfileModal({
           )}
 
           {!user ? (
-            <div className="py-3 space-y-4">
-              <p className="text-sm text-slate-600 leading-relaxed">
-                Sign in securely with Google to publish Jobs, Market products &amp; services, or Houses for rent across Zimbabwe. You can save your +263 WhatsApp number, track post approvals, request verification, and sponsor listings.
-              </p>
+            <div className="space-y-4">
+              {/* Sign In / Sign Up Switcher */}
+              <div className="grid grid-cols-2 p-1 rounded-xl bg-slate-100 border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('signin');
+                    setError('');
+                    setSuccessMsg('');
+                  }}
+                  className={`min-h-[40px] rounded-lg text-xs sm:text-sm font-semibold transition-colors ${
+                    authMode === 'signin'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('signup');
+                    setError('');
+                    setSuccessMsg('');
+                  }}
+                  className={`min-h-[40px] rounded-lg text-xs sm:text-sm font-semibold transition-colors ${
+                    authMode === 'signup'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Sign Up
+                </button>
+              </div>
+
+              {authMode === 'signin' ? (
+                <form onSubmit={handleCredentialSignIn} className="space-y-3.5">
+                  <p className="text-xs sm:text-sm text-slate-600">
+                    Sign in to access all four tabs: <strong>Jobs</strong>, <strong>Market</strong>,{' '}
+                    <strong>Houses</strong>, and <strong>Singles</strong>.
+                  </p>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Email or Zimbabwe Phone Number
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={loginIdentifier}
+                      onChange={(e) => setLoginIdentifier(e.target.value)}
+                      placeholder="you@example.com or 0771234567"
+                      className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">Password</label>
+                    <div className="relative">
+                      <input
+                        type={showLoginPw ? 'text' : 'password'}
+                        required
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        placeholder="Enter your password"
+                        className="w-full min-h-[44px] pl-3.5 pr-11 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowLoginPw((v) => !v)}
+                        aria-label={showLoginPw ? 'Hide password' : 'Show password'}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-500 hover:text-slate-800"
+                      >
+                        {showLoginPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={signingIn}
+                    className="w-full min-h-[46px] rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold transition-colors disabled:opacity-60"
+                  >
+                    {signingIn ? 'Signing in...' : 'Sign In'}
+                  </button>
+                </form>
+              ) : (
+                <form onSubmit={handleStage1Register} className="space-y-3.5">
+                  <OnboardingStepper current="details" />
+                  <p className="text-xs text-slate-600">
+                    Step 1: Fill in your details. Next you will upload a profile photo, and finally you can request verification after everything is ready.
+                  </p>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">Full Name</label>
+                    <input
+                      type="text"
+                      required
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                      placeholder="e.g. Tatenda Moyo"
+                      className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">Email Address</label>
+                      <input
+                        type="email"
+                        required
+                        value={signupEmail}
+                        onChange={(e) => setSignupEmail(e.target.value)}
+                        placeholder="tatenda@example.co.zw"
+                        className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                        Password (6+ chars)
+                      </label>
+                      <div className="relative">
+                        <input
+                          type={showSignupPw ? 'text' : 'password'}
+                          required
+                          minLength={6}
+                          value={signupPassword}
+                          onChange={(e) => setSignupPassword(e.target.value)}
+                          placeholder="Create a password"
+                          className="w-full min-h-[44px] pl-3.5 pr-11 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowSignupPw((v) => !v)}
+                          aria-label={showSignupPw ? 'Hide password' : 'Show password'}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-500 hover:text-slate-800"
+                        >
+                          {showSignupPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">Phone Number</label>
+                      <input
+                        type="tel"
+                        required
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        placeholder="0771234567"
+                        className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                        WhatsApp Number
+                      </label>
+                      <input
+                        type="tel"
+                        value={whatsapp}
+                        onChange={(e) => setWhatsapp(e.target.value)}
+                        placeholder="Same as phone or 077..."
+                        className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      />
+                    </div>
+                  </div>
+                  {(whatsapp || phone) && (
+                    <p className="text-xs text-slate-500 tabular-nums -mt-1">
+                      Click-to-chat format: {formatZimbabwePhoneDisplay(normalizeZimbabwePhone(whatsapp || phone))}
+                    </p>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">City / Location</label>
+                    <select
+                      value={city}
+                      onChange={(e) => setCity(e.target.value)}
+                      className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                    >
+                      {ZIMBABWE_LOCATIONS.map((loc) => (
+                        <option key={loc} value={loc}>
+                          {loc}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-rose-50/60 border border-rose-200 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <Heart className="w-4 h-4 text-rose-900 mt-0.5 shrink-0" aria-hidden="true" />
+                      <div>
+                        <p className="text-xs font-bold text-slate-900">
+                          Would you also like to join the Dating section and meet singles?
+                        </p>
+                        <p className="text-[11px] text-slate-600 mt-0.5">
+                          Optional · Adults 18+ only · You can use all tabs either way
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDatingOptIn('yes')}
+                        className={`min-h-[36px] px-3 rounded-lg border text-xs font-semibold transition-colors ${
+                          datingOptIn === 'yes'
+                            ? 'bg-rose-900 text-white border-rose-900'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-rose-50'
+                        }`}
+                      >
+                        Yes (18+)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDatingOptIn('no')}
+                        className={`min-h-[36px] px-3 rounded-lg border text-xs font-semibold transition-colors ${
+                          datingOptIn === 'no'
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        No
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="w-full min-h-[46px] rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+                  >
+                    {submitting ? 'Creating Account...' : 'Create Account & Upload Profile Photo'}
+                    <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                  </button>
+                </form>
+              )}
+
+              <div className="relative flex items-center py-1">
+                <div className="flex-grow border-t border-slate-200" />
+                <span className="shrink mx-3 text-xs font-medium text-slate-400 uppercase">or</span>
+                <div className="flex-grow border-t border-slate-200" />
+              </div>
+
               <button
                 type="button"
-                disabled={signingIn}
+                disabled={signingIn || submitting}
                 onClick={handleGoogleSignIn}
-                className="w-full min-h-[48px] px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold inline-flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60"
+                className="w-full min-h-[46px] px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold inline-flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
                   <path
@@ -482,8 +875,277 @@ export function AuthProfileModal({
                 {signingIn ? 'Connecting to Google...' : 'Continue with Google'}
               </button>
             </div>
+          ) : onboardingStep === 'details' ? (
+            <form
+              onSubmit={(e) => handleSaveProfile(e, { advanceTo: 'photo' })}
+              className="space-y-4"
+            >
+              <OnboardingStepper current="details" />
+              <p className="text-xs text-slate-600">
+                Complete your Zimbabwe contact details so employers, buyers, landlords, and singles can reach you on WhatsApp.
+              </p>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Full Name</label>
+                <input
+                  type="text"
+                  required
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Phone Number</label>
+                  <input
+                    type="tel"
+                    required
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="0771234567"
+                    className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">WhatsApp Number</label>
+                  <input
+                    type="tel"
+                    required
+                    value={whatsapp}
+                    onChange={(e) => setWhatsapp(e.target.value)}
+                    placeholder="0771234567"
+                    className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">City / Location</label>
+                <select
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                >
+                  {ZIMBABWE_LOCATIONS.map((loc) => (
+                    <option key={loc} value={loc}>
+                      {loc}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full min-h-[46px] rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+              >
+                {submitting ? 'Saving Details...' : 'Save Details & Upload Profile Photo'}
+                <ArrowRight className="w-4 h-4" aria-hidden="true" />
+              </button>
+            </form>
+          ) : onboardingStep === 'photo' ? (
+            <form
+              onSubmit={(e) => handleSaveProfile(e, { advanceTo: 'verify' })}
+              className="space-y-5"
+            >
+              <OnboardingStepper current="photo" />
+
+              <div className="text-center space-y-2 pt-1">
+                <div className="w-24 h-24 mx-auto rounded-full overflow-hidden bg-slate-100 border-2 border-slate-200 flex items-center justify-center">
+                  {avatar ? (
+                    <img src={avatar} alt={fullName} className="w-full h-full object-cover" />
+                  ) : (
+                    <UserIcon className="w-10 h-10 text-slate-400" />
+                  )}
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Upload Your Profile Picture</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Photos are automatically compressed to save Zimbabwe mobile data.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-col items-center gap-2">
+                <label className="inline-flex items-center gap-2 min-h-[44px] px-4 rounded-xl border border-slate-300 hover:bg-slate-50 text-xs sm:text-sm font-semibold text-slate-800 cursor-pointer">
+                  <Camera className="w-4 h-4" aria-hidden="true" />
+                  {avatar ? 'Choose Different Photo' : 'Select Profile Photo'}
+                  <input type="file" accept="image/*" onChange={handleAvatarUpload} className="sr-only" />
+                </label>
+                {avatarInfo && <p className="text-xs text-emerald-700 font-medium">{avatarInfo}</p>}
+                {avatar && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAvatar(null);
+                      setAvatarInfo('');
+                    }}
+                    className="text-xs text-slate-500 hover:text-red-600"
+                  >
+                    Remove photo
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="w-full min-h-[46px] rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+                >
+                  {submitting
+                    ? 'Saving Profile...'
+                    : avatar
+                      ? 'Save Photo & Continue to Verification'
+                      : 'Continue to Verification'}
+                  <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError('');
+                    setSuccessMsg('');
+                    setOnboardingStep('verify');
+                  }}
+                  className="w-full min-h-[40px] rounded-lg text-xs font-semibold text-slate-500 hover:text-slate-900 hover:bg-slate-50"
+                >
+                  Skip photo for now
+                </button>
+              </div>
+            </form>
+          ) : onboardingStep === 'verify' ? (
+            <div className="space-y-4">
+              <OnboardingStepper current="verify" />
+
+              {/* Account Summary */}
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex items-center gap-3.5">
+                <div className="w-14 h-14 rounded-full overflow-hidden bg-white border border-slate-200 flex items-center justify-center shrink-0">
+                  {user.avatar ? (
+                    <img src={user.avatar} alt={user.fullName} className="w-full h-full object-cover" />
+                  ) : (
+                    <UserIcon className="w-6 h-6 text-slate-400" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-slate-900 truncate">{user.fullName}</p>
+                  <p className="text-xs text-slate-600 truncate">
+                    {user.city} · {formatZimbabwePhoneDisplay(user.whatsapp)}
+                  </p>
+                  <p className="text-[11px] text-slate-500 truncate">{user.email}</p>
+                </div>
+              </div>
+
+              {/* All 4 Tabs Ready Notice */}
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 space-y-2.5">
+                <p className="text-xs font-bold text-emerald-950">
+                  Your account is active across all 4 tabs right now:
+                </p>
+                <div className="grid grid-cols-2 gap-2 text-xs text-emerald-900">
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <Briefcase className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    Jobs: Post &amp; Apply
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <ShoppingBag className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    Market: Buy &amp; Sell
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <Home className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    Houses: List &amp; Rent
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <Heart className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    Singles: Join &amp; Connect
+                  </span>
+                </div>
+              </div>
+
+              {/* Late Verification Request Card */}
+              <div className="p-4 rounded-xl border border-slate-200 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <ShieldCheck className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" aria-hidden="true" />
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Request Account Verification</h3>
+                    <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                      Now that your details and profile are set up, you can request a Verified Member badge so employers, buyers, landlords, and singles trust your profile faster.
+                    </p>
+                  </div>
+                </div>
+
+                {user.verificationStatus === 'verified' ? (
+                  <div className="px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-800 inline-flex items-center gap-1.5">
+                    <BadgeCheck className="w-4 h-4" aria-hidden="true" />
+                    Verified Zimbabwe Member
+                  </div>
+                ) : user.verificationStatus === 'pending' ? (
+                  <div className="px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800 inline-flex items-center gap-1.5">
+                    <Clock className="w-4 h-4" aria-hidden="true" />
+                    Verification Request Submitted (Pending Admin Review)
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={verifyingReq}
+                    onClick={handleRequestVerification}
+                    className="w-full min-h-[42px] rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold disabled:opacity-60"
+                  >
+                    {verifyingReq ? 'Submitting Request...' : 'Request Verification Now'}
+                  </button>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={handleFinishOnboarding}
+                className="w-full min-h-[46px] rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold"
+              >
+                Start Using All Tabs
+              </button>
+            </div>
           ) : tab === 'profile' ? (
-            <form onSubmit={handleSaveProfile} className="space-y-4">
+            <form onSubmit={(e) => handleSaveProfile(e)} className="space-y-4">
+              {/* Account Setup Progress Strip */}
+              <div className="grid grid-cols-3 gap-2">
+                <div className="px-2.5 py-2 rounded-lg bg-emerald-50/70 border border-emerald-200 text-[11px] font-semibold text-emerald-900 flex items-center gap-1.5">
+                  <Check className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span className="truncate">1. Details</span>
+                </div>
+                <div
+                  className={`px-2.5 py-2 rounded-lg border text-[11px] font-semibold flex items-center gap-1.5 ${
+                    avatar
+                      ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                      : 'bg-slate-50 border-slate-200 text-slate-600'
+                  }`}
+                >
+                  {avatar ? (
+                    <Check className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <Camera className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  )}
+                  <span className="truncate">2. Photo</span>
+                </div>
+                <div
+                  className={`px-2.5 py-2 rounded-lg border text-[11px] font-semibold flex items-center gap-1.5 ${
+                    user.verificationStatus === 'verified'
+                      ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                      : user.verificationStatus === 'pending'
+                        ? 'bg-amber-50 border-amber-200 text-amber-900'
+                        : 'bg-slate-50 border-slate-200 text-slate-600'
+                  }`}
+                >
+                  {user.verificationStatus === 'verified' ? (
+                    <BadgeCheck className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <Clock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  )}
+                  <span className="truncate">
+                    3. {user.verificationStatus === 'verified' ? 'Verified' : user.verificationStatus === 'pending' ? 'Pending' : 'Verify'}
+                  </span>
+                </div>
+              </div>
+
               <div className="flex items-center gap-4">
                 <div className="w-16 h-16 rounded-full overflow-hidden bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0">
                   {avatar ? (
@@ -536,7 +1198,7 @@ export function AuthProfileModal({
                       Suspended
                     </p>
                   ) : (
-                    <p className="text-sm font-semibold text-slate-700">Unverified Account</p>
+                    <p className="text-sm font-semibold text-slate-700">Unverified Account (All 4 tabs active)</p>
                   )}
                   {user.verificationNote && (
                     <p className="text-xs text-slate-600">{user.verificationNote}</p>
@@ -611,6 +1273,57 @@ export function AuthProfileModal({
                 </select>
               </div>
 
+              {/* Optional Dating / Singles Opt-In Question */}
+              <div className="p-3.5 rounded-xl bg-rose-50/60 border border-rose-200 space-y-2.5">
+                <div className="flex items-start gap-2">
+                  <Heart className="w-4 h-4 text-rose-900 mt-0.5 shrink-0" aria-hidden="true" />
+                  <div>
+                    <p className="text-xs font-bold text-slate-900">
+                      Would you also like to join the Dating section and meet singles?
+                    </p>
+                    <p className="text-[11px] text-slate-600 mt-0.5">
+                      Optional · Adults 18+ only · Opposite-gender private matching
+                    </p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDatingOptIn('yes')}
+                    className={`min-h-[38px] px-3 rounded-lg border text-xs font-semibold transition-colors ${
+                      datingOptIn === 'yes'
+                        ? 'bg-rose-900 text-white border-rose-900'
+                        : 'bg-white text-slate-700 border-slate-200 hover:bg-rose-50'
+                    }`}
+                  >
+                    Yes (18+)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDatingOptIn('no')}
+                    className={`min-h-[38px] px-3 rounded-lg border text-xs font-semibold transition-colors ${
+                      datingOptIn === 'no'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    No
+                  </button>
+                </div>
+                {datingOptIn === 'yes' && onOpenSingles && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenSingles();
+                    }}
+                    className="text-xs font-semibold text-rose-900 hover:underline"
+                  >
+                    Open Singles section to set up your 18+ dating profile &rarr;
+                  </button>
+                )}
+              </div>
+
               <div className="pt-2 flex flex-col gap-2.5">
                 <button
                   type="submit"
@@ -634,18 +1347,17 @@ export function AuthProfileModal({
             </form>
           ) : tab === 'listings' ? (
             <div className="space-y-5">
-              {/* Inline Sponsorship Payment Submission Drawer */}
+              {/* Inline Sponsorship Plan Selector -> Opens Central Checkout */}
               {sponsorTarget && (
-                <form
-                  onSubmit={handleSubmitSponsorship}
-                  className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-3"
-                >
+                <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <h3 className="text-sm font-bold text-slate-900">
                         Sponsor &ldquo;{sponsorTarget.title}&rdquo;
                       </h3>
-                      <p className="text-xs text-slate-600 mt-0.5">{paymentInstructions}</p>
+                      <p className="text-xs text-slate-600 mt-0.5">
+                        Boost this listing above regular posts with a SPONSORED badge. Pay securely via Paynow Zimbabwe, PayPal, or EcoCash/InnBucks.
+                      </p>
                     </div>
                     <button
                       type="button"
@@ -658,7 +1370,7 @@ export function AuthProfileModal({
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     {sponsorshipPlans.map((plan) => {
-                      const active = selectedPlanId === plan.id;
+                      const active = (selectedPlanId || sponsorshipPlans[0]?.id) === plan.id;
                       return (
                         <button
                           key={plan.id}
@@ -679,44 +1391,15 @@ export function AuthProfileModal({
                     })}
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Payment Method
-                      </label>
-                      <select
-                        value={paymentMethod}
-                        onChange={(e) => setPaymentMethod(e.target.value)}
-                        className="w-full min-h-[40px] px-3 rounded-lg border border-slate-300 bg-white text-xs text-slate-900"
-                      >
-                        <option value="EcoCash">EcoCash</option>
-                        <option value="InnBucks">InnBucks</option>
-                        <option value="Bank Transfer">Bank Transfer</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Payment Reference
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={paymentReference}
-                        onChange={(e) => setPaymentReference(e.target.value)}
-                        placeholder="e.g. MP260412.1432.A91"
-                        className="w-full min-h-[40px] px-3 rounded-lg border border-slate-300 bg-white text-xs text-slate-900"
-                      />
-                    </div>
-                  </div>
-
                   <button
-                    type="submit"
-                    disabled={sponsorSubmitting}
-                    className="w-full min-h-[42px] rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold disabled:opacity-60"
+                    type="button"
+                    disabled={!activeSponsorPlan}
+                    onClick={() => setCheckoutOpen(true)}
+                    className="w-full min-h-[42px] rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold disabled:opacity-60"
                   >
-                    {sponsorSubmitting ? 'Submitting Payment...' : 'Submit Payment Reference for Verification'}
+                    Proceed to Secure Payment ({activeSponsorPlan ? `$${activeSponsorPlan.priceUsd} USD` : ''})
                   </button>
-                </form>
+                </div>
               )}
 
               {listingsLoading ? (
@@ -921,6 +1604,35 @@ export function AuthProfileModal({
           )}
         </div>
       </div>
+
+      {sponsorTarget && activeSponsorPlan && (
+        <PaymentCheckoutModal
+          isOpen={checkoutOpen}
+          featureType={
+            sponsorTarget.listingType === 'job'
+              ? 'sponsored_job'
+              : sponsorTarget.listingType === 'market'
+                ? 'sponsored_market'
+                : 'sponsored_house'
+          }
+          targetId={sponsorTarget.listingId}
+          planOrPackageId={activeSponsorPlan.id}
+          itemTitle={`${sponsorTarget.title} (${activeSponsorPlan.name})`}
+          amountUsd={activeSponsorPlan.priceUsd}
+          subtitle={`${activeSponsorPlan.durationDays}-day featured placement on MARKET & JOBS`}
+          capabilities={paymentCapabilities}
+          paymentInstructions={paymentInstructions}
+          accent="emerald"
+          onClose={() => setCheckoutOpen(false)}
+          onSuccess={(msg) => {
+            setCheckoutOpen(false);
+            setSponsorTarget(null);
+            setSuccessMsg(msg);
+            loadMyListings();
+            onListingChanged?.();
+          }}
+        />
+      )}
     </div>
   );
 }

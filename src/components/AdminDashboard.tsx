@@ -3,12 +3,15 @@ import {
   Activity,
   ArrowLeft,
   BadgeCheck,
+  Ban,
   Check,
   CheckCircle2,
+  CreditCard,
   Download,
   Eye,
   Flag,
   FolderTree,
+  Heart,
   LayoutDashboard,
   Layers,
   Lock,
@@ -16,6 +19,7 @@ import {
   Megaphone,
   Pencil,
   Plus,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
@@ -29,14 +33,20 @@ import {
 } from 'lucide-react';
 import type {
   AdminAccount,
+  DatingPackage,
+  DatingProfilePrivate,
+  DatingSubscription,
   HouseListing,
   JobListing,
   MarketListing,
+  PaymentCapabilities,
+  PaymentTransaction,
   SponsorshipPayment,
   SponsorshipPlan,
   UserProfile,
 } from '../types';
 import { ZIMBABWE_LOCATIONS } from '../types';
+import { resolveAssetUrl } from '../utils/assetResolver';
 import { formatShortDate, formatZimbabwePhoneDisplay } from '../utils/whatsapp';
 
 type AdminSection =
@@ -44,6 +54,8 @@ type AdminSection =
   | 'users'
   | 'verification'
   | 'listings'
+  | 'dating'
+  | 'transactions'
   | 'sponsorships'
   | 'reports'
   | 'categories'
@@ -67,6 +79,10 @@ interface OverviewResponse {
     confirmedPayments: number;
     expiredSponsorships: number;
     sponsorshipRevenueUsd: number;
+    datingMembers: number;
+    pendingDatingProfiles: number;
+    activeDatingSubscriptions: number;
+    centralRevenueUsd: number;
     openReports: number;
   };
   recentLogs: AuditLogRow[];
@@ -94,7 +110,7 @@ interface AdminListingItem {
 
 interface AdminReportItem {
   id: number;
-  listingType: 'job' | 'market' | 'house';
+  listingType: 'job' | 'market' | 'house' | 'dating';
   listingId: number;
   listingTitle: string;
   reporterName: string;
@@ -137,6 +153,7 @@ const ROLE_DEFAULTS: Record<string, string[]> = {
     'manage_users',
     'verify_users',
     'moderate_ads',
+    'manage_dating',
     'manage_sponsorships',
     'manage_payments',
     'manage_reports',
@@ -145,7 +162,7 @@ const ROLE_DEFAULTS: Record<string, string[]> = {
     'view_logs',
     'manage_settings',
   ],
-  moderator: ['moderate_ads', 'manage_reports'],
+  moderator: ['moderate_ads', 'manage_dating', 'manage_reports'],
   user_manager: ['manage_users', 'verify_users'],
   sponsorship_manager: ['manage_sponsorships', 'manage_payments'],
 };
@@ -266,6 +283,80 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
   const [paymentInstructions, setPaymentInstructions] = useState('');
   const [listingExpiryDays, setListingExpiryDays] = useState('30');
 
+  // Dating / Singles Management state
+  const [datingSearch, setDatingSearch] = useState('');
+  const [datingGenderFilter, setDatingGenderFilter] = useState('all');
+  const [datingApprovalFilter, setDatingApprovalFilter] = useState('all');
+  const [datingCountryFilter, setDatingCountryFilter] = useState('');
+  const [datingCityFilter, setDatingCityFilter] = useState('');
+  const [datingData, setDatingData] = useState<{
+    summary: {
+      totalMembers: number;
+      pendingApproval: number;
+      maleCount: number;
+      femaleCount: number;
+      activeSubscriptions: number;
+      expiredSubscriptions: number;
+      totalSelections: number;
+      openDatingReports: number;
+    };
+    profiles: DatingProfilePrivate[];
+    packages: DatingPackage[];
+    subscriptions: DatingSubscription[];
+    selections: Array<{
+      id: number;
+      chooserName: string;
+      targetName: string;
+      targetCity: string;
+      createdAt: string;
+    }>;
+    reports: AdminReportItem[];
+    settings: {
+      datingEnabled: boolean;
+      datingRequireApproval: boolean;
+      datingAllowHivDisclosure: boolean;
+    };
+  } | null>(null);
+  const [datingPackagePrices, setDatingPackagePrices] = useState<Record<number, string>>({});
+  const [datingRejectDialog, setDatingRejectDialog] = useState<{
+    profile: DatingProfilePrivate;
+    reason: string;
+  } | null>(null);
+
+  // Central Payments Console state
+  const [txSearch, setTxSearch] = useState('');
+  const [txFeatureFilter, setTxFeatureFilter] = useState('all');
+  const [txGatewayFilter, setTxGatewayFilter] = useState('all');
+  const [txStatusFilter, setTxStatusFilter] = useState('all');
+  const [txData, setTxData] = useState<{
+    capabilities: PaymentCapabilities;
+    summary: {
+      totalRevenueUsd: number;
+      refundedRevenueUsd: number;
+      pendingCount: number;
+      paidCount: number;
+      failedCount: number;
+      refundedCount: number;
+      revenueByFeature: {
+        dating_package: number;
+        sponsored_job: number;
+        sponsored_market: number;
+        sponsored_house: number;
+      };
+      revenueByGateway: {
+        paynow: number;
+        paypal: number;
+        manual: number;
+      };
+    };
+    transactions: PaymentTransaction[];
+  } | null>(null);
+  const [txNoteById, setTxNoteById] = useState<Record<number, string>>({});
+  const [refundDialog, setRefundDialog] = useState<{
+    tx: PaymentTransaction;
+    reason: string;
+  } | null>(null);
+
   useEffect(() => {
     fetch('/api/admin/status')
       .then((r) => r.json())
@@ -347,6 +438,38 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
         if (!res.ok) throw new Error(data.error || 'Failed to load administrators');
         setAdminAccounts(data.admins ?? []);
         setAllPermissions(data.allPermissions ?? ROLE_DEFAULTS.super_admin);
+      } else if (section === 'dating') {
+        const params = new URLSearchParams({
+          gender: datingGenderFilter,
+          approvalStatus: datingApprovalFilter,
+        });
+        if (datingSearch.trim()) params.set('q', datingSearch.trim());
+        if (datingCountryFilter.trim()) params.set('country', datingCountryFilter.trim());
+        if (datingCityFilter.trim()) params.set('city', datingCityFilter.trim());
+        const res = await fetch(`/api/admin/dating/overview?${params.toString()}`, {
+          headers: adminHeaders(),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load dating management console');
+        setDatingData(data);
+        const priceMap: Record<number, string> = {};
+        for (const p of (data.packages ?? []) as DatingPackage[]) {
+          priceMap[p.id] = String(p.priceUsd);
+        }
+        setDatingPackagePrices(priceMap);
+      } else if (section === 'transactions') {
+        const params = new URLSearchParams({
+          featureType: txFeatureFilter,
+          gateway: txGatewayFilter,
+          status: txStatusFilter,
+        });
+        if (txSearch.trim()) params.set('q', txSearch.trim());
+        const res = await fetch(`/api/admin/transactions?${params.toString()}`, {
+          headers: adminHeaders(),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load central payment transactions');
+        setTxData(data);
       } else if (section === 'logs') {
         const reqs: Promise<Response>[] = [];
         const canLogs = hasPerm('view_logs');
@@ -378,6 +501,15 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
     listingTypeFilter,
     listingApprovalFilter,
     listingSearch,
+    datingSearch,
+    datingGenderFilter,
+    datingApprovalFilter,
+    datingCountryFilter,
+    datingCityFilter,
+    txSearch,
+    txFeatureFilter,
+    txGatewayFilter,
+    txStatusFilter,
     adminHeaders,
     hasPerm,
   ]);
@@ -807,6 +939,152 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
     setNotice('Database backup snapshot exported.');
   };
 
+  // Dating Management Handlers
+  const handleModerateDatingProfile = async (
+    profile: DatingProfilePrivate,
+    decision: 'approve' | 'reject',
+    reason?: string
+  ) => {
+    setError('');
+    const res = await fetch(`/api/admin/dating/profiles/${profile.id}/moderate`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: JSON.stringify({ decision, reason }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || 'Failed to moderate dating profile.');
+      return;
+    }
+    setDatingRejectDialog(null);
+    setNotice(`Dating profile "${profile.displayName}" marked as ${data.profile.approvalStatus}.`);
+    loadSectionData();
+  };
+
+  const handleToggleDatingSuspend = async (profile: DatingProfilePrivate) => {
+    const res = await fetch(`/api/admin/dating/profiles/${profile.id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: JSON.stringify({ isSuspended: !profile.isSuspended }),
+    });
+    if (res.ok) {
+      setNotice(
+        `${profile.displayName} is now ${profile.isSuspended ? 'active' : 'suspended'} in Singles.`
+      );
+      loadSectionData();
+    }
+  };
+
+  const handleDeleteDatingProfile = async (profileId: number) => {
+    const res = await fetch(`/api/admin/dating/profiles/${profileId}`, {
+      method: 'DELETE',
+      headers: adminHeaders(),
+    });
+    if (res.ok) {
+      setConfirmDeleteKey(null);
+      setNotice('Dating profile removed.');
+      loadSectionData();
+    }
+  };
+
+  const handleSaveDatingPackage = async (pkg: DatingPackage) => {
+    const priceUsd = Number(datingPackagePrices[pkg.id]);
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) {
+      setError('Enter a valid USD package price.');
+      return;
+    }
+    const res = await fetch(`/api/admin/dating/packages/${pkg.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: JSON.stringify({ priceUsd }),
+    });
+    if (res.ok) {
+      setNotice(`Updated "${pkg.name}" price to $${priceUsd} USD.`);
+      loadSectionData();
+    }
+  };
+
+  const handleToggleDatingPackageActive = async (pkg: DatingPackage) => {
+    const res = await fetch(`/api/admin/dating/packages/${pkg.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: JSON.stringify({ isActive: !pkg.isActive }),
+    });
+    if (res.ok) loadSectionData();
+  };
+
+  const handleUpdateDatingSettings = async (patch: {
+    datingEnabled?: boolean;
+    datingRequireApproval?: boolean;
+    datingAllowHivDisclosure?: boolean;
+  }) => {
+    const res = await fetch('/api/admin/dating/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: JSON.stringify(patch),
+    });
+    if (res.ok) {
+      setNotice('Singles privacy & moderation settings updated.');
+      loadSectionData();
+    }
+  };
+
+  // Central Payments Handlers
+  const handleConfirmCentralTx = async (tx: PaymentTransaction) => {
+    setError('');
+    const adminNote = txNoteById[tx.id] ?? '';
+    const res = await fetch(`/api/admin/transactions/${tx.id}/confirm`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: JSON.stringify({ adminNote }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || 'Could not confirm payment.');
+      return;
+    }
+    setNotice(`Confirmed $${tx.amountUsd} USD (${tx.merchantReference}) & activated access.`);
+    loadSectionData();
+  };
+
+  const handleFailCentralTx = async (tx: PaymentTransaction) => {
+    setError('');
+    const adminNote = txNoteById[tx.id] ?? '';
+    const res = await fetch(`/api/admin/transactions/${tx.id}/fail`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: JSON.stringify({ adminNote }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || 'Could not reject payment.');
+      return;
+    }
+    setNotice(`Marked ${tx.merchantReference} as failed/rejected.`);
+    loadSectionData();
+  };
+
+  const handleRefundCentralTx = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!refundDialog) return;
+    setError('');
+    const res = await fetch(`/api/admin/transactions/${refundDialog.tx.id}/refund`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: JSON.stringify({ reason: refundDialog.reason.trim() }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || 'Refund failed.');
+      return;
+    }
+    setNotice(
+      `Refunded $${refundDialog.tx.amountUsd} USD for ${refundDialog.tx.merchantReference} and revoked granted access.`
+    );
+    setRefundDialog(null);
+    loadSectionData();
+  };
+
   // Unauthenticated / First-run Super Admin Bootstrap Gate
   if (!adminToken || !currentAdmin) {
     return (
@@ -971,8 +1249,20 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
       visible: hasPerm('moderate_ads'),
     },
     {
+      id: 'dating',
+      label: 'Dating / Singles',
+      icon: <Heart className="w-4 h-4" />,
+      visible: hasPerm('manage_dating'),
+    },
+    {
+      id: 'transactions',
+      label: 'Central Payments',
+      icon: <CreditCard className="w-4 h-4" />,
+      visible: hasPerm('manage_payments'),
+    },
+    {
       id: 'sponsorships',
-      label: 'Sponsorships & Pay',
+      label: 'Sponsorship Plans',
       icon: <Megaphone className="w-4 h-4" />,
       visible: hasPerm('manage_sponsorships') || hasPerm('manage_payments'),
     },
@@ -1179,7 +1469,7 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <div className="bg-white border border-slate-200 rounded-xl p-4">
                   <p className="text-xs font-semibold text-slate-500">Pending Verification Requests</p>
                   <p className="text-xl font-bold text-slate-900 mt-1 tabular-nums">
@@ -1187,13 +1477,25 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
                   </p>
                 </div>
                 <div className="bg-white border border-slate-200 rounded-xl p-4">
-                  <p className="text-xs font-semibold text-slate-500">Confirmed / Expired Sponsorships</p>
-                  <p className="text-xl font-bold text-slate-900 mt-1 tabular-nums">
-                    {overview.stats.confirmedPayments} active / {overview.stats.expiredSponsorships} expired
+                  <p className="text-xs font-semibold text-slate-500">Dating / Singles Members</p>
+                  <p className="text-xl font-bold text-rose-900 mt-1 tabular-nums">
+                    {overview.stats.datingMembers}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                    {overview.stats.pendingDatingProfiles} pending · {overview.stats.activeDatingSubscriptions} active passes
                   </p>
                 </div>
                 <div className="bg-white border border-slate-200 rounded-xl p-4">
-                  <p className="text-xs font-semibold text-slate-500">Open Suspicious Ad Reports</p>
+                  <p className="text-xs font-semibold text-slate-500">Central Payments Total</p>
+                  <p className="text-xl font-bold text-emerald-700 mt-1 tabular-nums">
+                    ${overview.stats.centralRevenueUsd.toLocaleString()} USD
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                    {overview.stats.confirmedPayments} active / {overview.stats.expiredSponsorships} expired sponsors
+                  </p>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Open Suspicious Reports</p>
                   <p
                     className={`text-xl font-bold mt-1 tabular-nums ${
                       overview.stats.openReports > 0 ? 'text-red-600' : 'text-slate-900'
@@ -1654,6 +1956,586 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
             </div>
           )}
 
+          {/* DATING / SINGLES MANAGEMENT */}
+          {section === 'dating' && datingData && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Singles Profiles</p>
+                  <p className="text-2xl font-bold text-rose-900 mt-1 tabular-nums">
+                    {datingData.summary.totalMembers}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                    {datingData.summary.femaleCount} female · {datingData.summary.maleCount} male
+                  </p>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Pending Approval</p>
+                  <p className="text-2xl font-bold text-amber-700 mt-1 tabular-nums">
+                    {datingData.summary.pendingApproval}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                    {datingData.summary.openDatingReports} open dating reports
+                  </p>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Paid Packages</p>
+                  <p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">
+                    {datingData.summary.activeSubscriptions} active
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                    {datingData.summary.expiredSubscriptions} expired/exhausted
+                  </p>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Recorded Selections</p>
+                  <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
+                    {datingData.summary.totalSelections}
+                  </p>
+                </div>
+              </div>
+
+              {/* Privacy & Visibility Controls */}
+              <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900">Singles Section Privacy &amp; Controls</h2>
+                  <p className="text-xs text-slate-500">
+                    Opposite-gender visibility &amp; WhatsApp hiding are always enforced server-side.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleUpdateDatingSettings({ datingEnabled: !datingData.settings.datingEnabled })
+                    }
+                    className={`min-h-[36px] px-3 rounded-lg border text-xs font-semibold ${
+                      datingData.settings.datingEnabled
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-red-50 border-red-200 text-red-700'
+                    }`}
+                  >
+                    Singles Tab: {datingData.settings.datingEnabled ? 'Enabled' : 'Paused'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleUpdateDatingSettings({
+                        datingRequireApproval: !datingData.settings.datingRequireApproval,
+                      })
+                    }
+                    className={`min-h-[36px] px-3 rounded-lg border text-xs font-semibold ${
+                      datingData.settings.datingRequireApproval
+                        ? 'bg-slate-900 border-slate-900 text-white'
+                        : 'bg-white border-slate-200 text-slate-700'
+                    }`}
+                  >
+                    Require Approval: {datingData.settings.datingRequireApproval ? 'Yes' : 'Auto'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleUpdateDatingSettings({
+                        datingAllowHivDisclosure: !datingData.settings.datingAllowHivDisclosure,
+                      })
+                    }
+                    className={`min-h-[36px] px-3 rounded-lg border text-xs font-semibold ${
+                      datingData.settings.datingAllowHivDisclosure
+                        ? 'bg-rose-50 border-rose-200 text-rose-900'
+                        : 'bg-slate-100 border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    Subscriber HIV Consent Option:{' '}
+                    {datingData.settings.datingAllowHivDisclosure ? 'Allowed' : 'Hidden'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Package Pricing Editor */}
+              <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+                <h2 className="text-sm font-bold text-slate-900">Dating Package Pricing (USD)</h2>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {datingData.packages.map((pkg) => (
+                    <div
+                      key={pkg.id}
+                      className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/50 space-y-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-bold text-slate-900">{pkg.name}</p>
+                          <p className="text-xs text-slate-500">
+                            {pkg.isUnlimited
+                              ? `${pkg.durationDays || 30}-day unlimited`
+                              : `${pkg.minSelections}–${pkg.maxSelections} selections`}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleDatingPackageActive(pkg)}
+                          className={`min-h-[28px] px-2 rounded text-[11px] font-semibold border ${
+                            pkg.isActive
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                              : 'bg-slate-100 text-slate-500 border-slate-200'
+                          }`}
+                        >
+                          {pkg.isActive ? 'Active' : 'Disabled'}
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="1"
+                          step="any"
+                          value={datingPackagePrices[pkg.id] ?? String(pkg.priceUsd)}
+                          onChange={(e) =>
+                            setDatingPackagePrices((prev) => ({
+                              ...prev,
+                              [pkg.id]: e.target.value,
+                            }))
+                          }
+                          className="w-24 min-h-[36px] px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-semibold tabular-nums"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSaveDatingPackage(pkg)}
+                          className="min-h-[36px] px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold"
+                        >
+                          Update USD
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Member Profiles Directory */}
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="search"
+                      value={datingSearch}
+                      onChange={(e) => setDatingSearch(e.target.value)}
+                      placeholder="Search member name, phone, country, city..."
+                      className="w-full min-h-[40px] pl-9 pr-3 rounded-lg bg-white border border-slate-200 text-sm"
+                    />
+                  </div>
+                  <select
+                    value={datingGenderFilter}
+                    onChange={(e) => setDatingGenderFilter(e.target.value)}
+                    className="min-h-[40px] px-3 rounded-lg bg-white border border-slate-200 text-sm"
+                  >
+                    <option value="all">All Genders</option>
+                    <option value="female">Female</option>
+                    <option value="male">Male</option>
+                  </select>
+                  <select
+                    value={datingApprovalFilter}
+                    onChange={(e) => setDatingApprovalFilter(e.target.value)}
+                    className="min-h-[40px] px-3 rounded-lg bg-white border border-slate-200 text-sm"
+                  >
+                    <option value="all">All Approval</option>
+                    <option value="pending">Pending</option>
+                    <option value="approved">Approved</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={datingCountryFilter}
+                    onChange={(e) => setDatingCountryFilter(e.target.value)}
+                    placeholder="Country..."
+                    className="min-h-[40px] px-3 rounded-lg bg-white border border-slate-200 text-sm w-32"
+                  />
+                  <input
+                    type="text"
+                    value={datingCityFilter}
+                    onChange={(e) => setDatingCityFilter(e.target.value)}
+                    placeholder="City / Suburb..."
+                    className="min-h-[40px] px-3 rounded-lg bg-white border border-slate-200 text-sm w-36"
+                  />
+                </div>
+
+                <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
+                  {datingData.profiles.length === 0 ? (
+                    <p className="p-8 text-center text-sm text-slate-500">
+                      No dating profiles match your filters.
+                    </p>
+                  ) : (
+                    datingData.profiles.map((p) => (
+                      <div
+                        key={p.id}
+                        className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+                      >
+                        <div className="flex items-start gap-3.5 min-w-0">
+                          <img
+                            src={resolveAssetUrl(p.photo)}
+                            alt={p.displayName}
+                            className="w-14 h-14 rounded-xl object-cover border border-slate-200 shrink-0"
+                          />
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <span className="font-bold text-slate-900 text-sm">
+                                {p.displayName}, {p.age}
+                              </span>
+                              <span className="uppercase font-semibold text-rose-900">{p.gender}</span>
+                              <span
+                                className={`font-bold uppercase ${
+                                  p.approvalStatus === 'approved'
+                                    ? 'text-emerald-700'
+                                    : p.approvalStatus === 'rejected'
+                                      ? 'text-red-600'
+                                      : 'text-amber-700'
+                                }`}
+                              >
+                                {p.approvalStatus}
+                              </span>
+                              {p.isSuspended && (
+                                <span className="font-bold text-red-600 uppercase">SUSPENDED</span>
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-600">
+                              {p.suburb}, {p.city}, {p.country} · WA: {p.whatsapp} · Intent:{' '}
+                              <span className="capitalize">{p.intention.replace('_', ' ')}</span>
+                              {p.childrenCount !== null ? ` · ${p.childrenCount} children` : ''}
+                            </p>
+                            <p className="text-xs text-slate-500 line-clamp-2">{p.description}</p>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                          {p.approvalStatus !== 'approved' && (
+                            <button
+                              type="button"
+                              onClick={() => handleModerateDatingProfile(p, 'approve')}
+                              className="min-h-[34px] px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              Approve
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setDatingRejectDialog({ profile: p, reason: '' })}
+                            className="min-h-[34px] px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-semibold"
+                          >
+                            Reject
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleDatingSuspend(p)}
+                            className="min-h-[34px] px-3 rounded-lg border border-slate-200 hover:bg-slate-100 text-xs font-semibold inline-flex items-center gap-1"
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                            {p.isSuspended ? 'Unsuspend' : 'Suspend'}
+                          </button>
+                          {confirmDeleteKey === `dating:${p.id}` ? (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteDatingProfile(p.id)}
+                              className="min-h-[34px] px-3 rounded-lg bg-red-600 text-white text-xs font-semibold"
+                            >
+                              Confirm Delete
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteKey(`dating:${p.id}`)}
+                              className="min-h-[34px] px-2.5 rounded-lg text-red-600 hover:bg-red-50 text-xs font-medium"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Active/Expired Subscriptions & Recent Selections */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                  <div className="px-4 py-3 border-b border-slate-200">
+                    <h3 className="text-sm font-bold text-slate-900">
+                      Dating Packages &amp; Subscriptions
+                    </h3>
+                  </div>
+                  <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
+                    {datingData.subscriptions.length === 0 ? (
+                      <p className="p-6 text-center text-xs text-slate-500">
+                        No dating packages purchased yet.
+                      </p>
+                    ) : (
+                      datingData.subscriptions.map((sub) => (
+                        <div key={sub.id} className="px-4 py-3 flex items-center justify-between gap-2 text-xs">
+                          <div>
+                            <p className="font-bold text-slate-900">
+                              {sub.userName} · {sub.packageName} (${sub.amountUsd})
+                            </p>
+                            <p className="text-slate-500 tabular-nums">
+                              {sub.isUnlimited
+                                ? `30-day unlimited · Expires ${formatShortDate(sub.expiresAt)}`
+                                : `${sub.selectionsUsed}/${sub.selectionLimit} selected`}
+                            </p>
+                          </div>
+                          <span
+                            className={`font-bold uppercase ${
+                              sub.status === 'active'
+                                ? 'text-emerald-700'
+                                : sub.status === 'refunded'
+                                  ? 'text-red-600'
+                                  : 'text-slate-500'
+                            }`}
+                          >
+                            {sub.status}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                  <div className="px-4 py-3 border-b border-slate-200">
+                    <h3 className="text-sm font-bold text-slate-900">Recent Singles Selections</h3>
+                  </div>
+                  <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
+                    {datingData.selections.length === 0 ? (
+                      <p className="p-6 text-center text-xs text-slate-500">
+                        No WhatsApp selections recorded yet.
+                      </p>
+                    ) : (
+                      datingData.selections.map((sel) => (
+                        <div key={sel.id} className="px-4 py-3 flex items-center justify-between gap-2 text-xs">
+                          <span className="text-slate-800">
+                            <strong>{sel.chooserName}</strong> chose <strong>{sel.targetName}</strong> ({sel.targetCity})
+                          </span>
+                          <span className="text-slate-400 tabular-nums whitespace-nowrap">
+                            {formatDateTime(sel.createdAt)}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* CENTRAL PAYMENTS & REVENUE */}
+          {section === 'transactions' && txData && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Total Verified Revenue</p>
+                  <p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">
+                    ${txData.summary.totalRevenueUsd.toLocaleString()} USD
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                    {txData.summary.paidCount} paid · {txData.summary.pendingCount} pending
+                  </p>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Dating / Singles Revenue</p>
+                  <p className="text-2xl font-bold text-rose-900 mt-1 tabular-nums">
+                    ${txData.summary.revenueByFeature.dating_package.toLocaleString()}
+                  </p>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Sponsored Ads Revenue</p>
+                  <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
+                    $
+                    {(
+                      txData.summary.revenueByFeature.sponsored_job +
+                      txData.summary.revenueByFeature.sponsored_market +
+                      txData.summary.revenueByFeature.sponsored_house
+                    ).toLocaleString()}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                    Jobs ${txData.summary.revenueByFeature.sponsored_job} · Mkt $
+                    {txData.summary.revenueByFeature.sponsored_market} · Hse $
+                    {txData.summary.revenueByFeature.sponsored_house}
+                  </p>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-slate-500">Refunds &amp; Gateways</p>
+                  <p className="text-2xl font-bold text-red-600 mt-1 tabular-nums">
+                    ${txData.summary.refundedRevenueUsd.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                    PN ${txData.summary.revenueByGateway.paynow} · PP $
+                    {txData.summary.revenueByGateway.paypal} · Man $
+                    {txData.summary.revenueByGateway.manual}
+                  </p>
+                </div>
+              </div>
+
+              {/* Gateway Configuration Banner */}
+              <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="font-bold text-slate-700">Gateway Integrations:</span>
+                  <span
+                    className={`font-semibold ${
+                      txData.capabilities.paynowConfigured ? 'text-emerald-700' : 'text-amber-700'
+                    }`}
+                  >
+                    Paynow Zimbabwe ({txData.capabilities.paynowConfigured ? 'Configured' : 'Env Required'})
+                  </span>
+                  <span
+                    className={`font-semibold ${
+                      txData.capabilities.paypalConfigured ? 'text-emerald-700' : 'text-amber-700'
+                    }`}
+                  >
+                    PayPal ({txData.capabilities.paypalConfigured ? `Configured · ${txData.capabilities.paypalMode}` : 'Env Required'})
+                  </span>
+                  <span className="font-semibold text-emerald-700">
+                    Manual Reference Queue (Active)
+                  </span>
+                </div>
+              </div>
+
+              {/* Filters */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative flex-1 min-w-[220px]">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="search"
+                    value={txSearch}
+                    onChange={(e) => setTxSearch(e.target.value)}
+                    placeholder="Search reference, user, email, or item..."
+                    className="w-full min-h-[40px] pl-9 pr-3 rounded-lg bg-white border border-slate-200 text-sm"
+                  />
+                </div>
+                <select
+                  value={txFeatureFilter}
+                  onChange={(e) => setTxFeatureFilter(e.target.value)}
+                  className="min-h-[40px] px-3 rounded-lg bg-white border border-slate-200 text-sm"
+                >
+                  <option value="all">All Features</option>
+                  <option value="dating_package">Dating Packages</option>
+                  <option value="sponsored_job">Sponsored Jobs</option>
+                  <option value="sponsored_market">Sponsored Market</option>
+                  <option value="sponsored_house">Sponsored Houses</option>
+                </select>
+                <select
+                  value={txGatewayFilter}
+                  onChange={(e) => setTxGatewayFilter(e.target.value)}
+                  className="min-h-[40px] px-3 rounded-lg bg-white border border-slate-200 text-sm"
+                >
+                  <option value="all">All Gateways</option>
+                  <option value="paynow">Paynow Zimbabwe</option>
+                  <option value="paypal">PayPal</option>
+                  <option value="manual">Manual / EcoCash</option>
+                </select>
+                <select
+                  value={txStatusFilter}
+                  onChange={(e) => setTxStatusFilter(e.target.value)}
+                  className="min-h-[40px] px-3 rounded-lg bg-white border border-slate-200 text-sm"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="pending">Pending</option>
+                  <option value="paid">Paid</option>
+                  <option value="failed">Failed</option>
+                  <option value="refunded">Refunded</option>
+                </select>
+              </div>
+
+              <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
+                {txData.transactions.length === 0 ? (
+                  <p className="p-8 text-center text-sm text-slate-500">
+                    No payment transactions match your filters.
+                  </p>
+                ) : (
+                  txData.transactions.map((tx) => (
+                    <div
+                      key={tx.id}
+                      className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+                    >
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span
+                            className={`font-bold uppercase ${
+                              tx.status === 'paid'
+                                ? 'text-emerald-700'
+                                : tx.status === 'refunded' || tx.status === 'failed'
+                                  ? 'text-red-600'
+                                  : 'text-amber-700'
+                            }`}
+                          >
+                            {tx.status}
+                          </span>
+                          <span>·</span>
+                          <span className="font-bold text-slate-900 tabular-nums">
+                            ${tx.amountUsd} {tx.currency}
+                          </span>
+                          <span>·</span>
+                          <span className="uppercase font-semibold text-slate-600">{tx.gateway}</span>
+                          <span>·</span>
+                          <span className="text-slate-500">{tx.featureType.replace('_', ' ')}</span>
+                        </div>
+                        <p className="text-sm font-bold text-slate-900">{tx.targetTitle}</p>
+                        <p className="text-xs text-slate-500 tabular-nums">
+                          Ref: <span className="font-mono text-slate-800">{tx.merchantReference}</span>
+                          {tx.gatewayReference ? ` (Gateway: ${tx.gatewayReference})` : ''} ·{' '}
+                          {tx.userName} ({tx.userEmail}) · {formatDateTime(tx.createdAt)}
+                        </p>
+                        {tx.refundReason && (
+                          <p className="text-xs text-red-600">Refund note: {tx.refundReason}</p>
+                        )}
+                        {tx.adminNote && !tx.refundReason && (
+                          <p className="text-xs text-slate-600">Note: {tx.adminNote}</p>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {tx.status === 'pending' && (
+                          <>
+                            <input
+                              type="text"
+                              value={txNoteById[tx.id] ?? ''}
+                              onChange={(e) =>
+                                setTxNoteById((prev) => ({ ...prev, [tx.id]: e.target.value }))
+                              }
+                              placeholder="Admin note..."
+                              className="min-h-[36px] px-3 rounded-lg border border-slate-300 text-xs w-36"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleConfirmCentralTx(tx)}
+                              className="min-h-[36px] px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1"
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              Confirm Paid
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleFailCentralTx(tx)}
+                              className="min-h-[36px] px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-semibold inline-flex items-center gap-1"
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                              Reject
+                            </button>
+                          </>
+                        )}
+                        {tx.status === 'paid' && (
+                          <button
+                            type="button"
+                            onClick={() => setRefundDialog({ tx, reason: '' })}
+                            className="min-h-[36px] px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-semibold inline-flex items-center gap-1"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            Refund
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
           {/* SPONSORSHIPS & PAYMENTS */}
           {section === 'sponsorships' && sponsorshipData && (
             <div className="space-y-6">
@@ -1899,7 +2781,16 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
                     <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                       {rep.status === 'open' && (
                         <>
-                          {hasPerm('moderate_ads') && (
+                          {rep.listingType === 'dating' && hasPerm('manage_dating') && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteDatingProfile(rep.listingId)}
+                              className="min-h-[36px] px-3 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold"
+                            >
+                              Delete Profile
+                            </button>
+                          )}
+                          {rep.listingType !== 'dating' && hasPerm('moderate_ads') && (
                             <button
                               type="button"
                               onClick={() => handleDeleteListing(rep.listingType, rep.listingId)}
@@ -2497,6 +3388,95 @@ export function AdminDashboard({ onExitAdmin }: { onExitAdmin: () => void }) {
               className="w-full min-h-[44px] rounded-lg bg-slate-900 text-white text-sm font-semibold"
             >
               Save Changes
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Dating Profile Rejection Modal */}
+      {datingRejectDialog && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
+          onClick={() => setDatingRejectDialog(null)}
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleModerateDatingProfile(
+                datingRejectDialog.profile,
+                'reject',
+                datingRejectDialog.reason
+              );
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white w-full max-w-md rounded-2xl border border-slate-200 p-5 space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-slate-900">Reject Singles Profile</h3>
+              <button type="button" onClick={() => setDatingRejectDialog(null)}>
+                <X className="w-5 h-5 text-slate-500" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-600">
+              Provide a reason for rejecting <strong>{datingRejectDialog.profile.displayName}</strong>.
+            </p>
+            <textarea
+              required
+              rows={3}
+              value={datingRejectDialog.reason}
+              onChange={(e) =>
+                setDatingRejectDialog((prev) =>
+                  prev ? { ...prev, reason: e.target.value } : null
+                )
+              }
+              placeholder="e.g. Photo unclear or profile violates Singles terms..."
+              className="w-full p-3 rounded-lg border border-slate-300 text-sm"
+            />
+            <button
+              type="submit"
+              className="w-full min-h-[42px] rounded-lg bg-red-600 text-white text-sm font-semibold"
+            >
+              Reject &amp; Notify Member
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Central Transaction Refund Modal */}
+      {refundDialog && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
+          onClick={() => setRefundDialog(null)}
+        >
+          <form
+            onSubmit={handleRefundCentralTx}
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white w-full max-w-md rounded-2xl border border-slate-200 p-5 space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-slate-900">Issue Refund</h3>
+              <button type="button" onClick={() => setRefundDialog(null)}>
+                <X className="w-5 h-5 text-slate-500" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-600">
+              Refunding <strong>${refundDialog.tx.amountUsd} USD</strong> ({refundDialog.tx.merchantReference}) will automatically revoke the active subscription or listing sponsorship granted by this transaction.
+            </p>
+            <textarea
+              required
+              rows={3}
+              value={refundDialog.reason}
+              onChange={(e) =>
+                setRefundDialog((prev) => (prev ? { ...prev, reason: e.target.value } : null))
+              }
+              placeholder="Reason for refund (sent to user & recorded in audit log)..."
+              className="w-full p-3 rounded-lg border border-slate-300 text-sm"
+            />
+            <button
+              type="submit"
+              className="w-full min-h-[42px] rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-semibold"
+            >
+              Confirm Refund &amp; Revoke Access
             </button>
           </form>
         </div>

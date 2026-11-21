@@ -1,4 +1,4 @@
-export type TabType = 'jobs' | 'market' | 'houses';
+export type TabType = 'jobs' | 'market' | 'houses' | 'singles';
 
 export const ZIMBABWE_LOCATIONS = [
   'Harare',
@@ -21,6 +21,25 @@ export const ZIMBABWE_LOCATIONS = [
   'Kariba',
   'Other Zimbabwe',
 ] as const;
+
+export const DATING_COUNTRIES = [
+  'Zimbabwe',
+  'South Africa',
+  'Botswana',
+  'United Kingdom',
+  'United States',
+  'Canada',
+  'Australia',
+  'Other',
+] as const;
+
+export const RELATIONSHIP_INTENTIONS = [
+  { value: 'dating', label: 'Dating' },
+  { value: 'serious_relationship', label: 'Serious Relationship' },
+  { value: 'marriage', label: 'Marriage' },
+] as const;
+
+export const HIV_STATUS_OPTIONS = ['Prefer not to disclose', 'Negative', 'Positive'] as const;
 
 export const EMPLOYMENT_TYPES = [
   'Full-time',
@@ -94,6 +113,7 @@ export interface UserProfile {
   whatsapp: string;
   city: string;
   avatar: string | null;
+  datingOptIn?: 'unset' | 'yes' | 'no';
   verificationStatus: VerificationStatus;
   verificationNote: string | null;
   accountStatus: AccountStatus;
@@ -106,7 +126,7 @@ export interface NotificationItem {
   userId: number;
   title: string;
   message: string;
-  category: 'approval' | 'verification' | 'sponsorship' | 'account' | string;
+  category: 'approval' | 'verification' | 'sponsorship' | 'account' | 'dating' | 'payment' | string;
   isRead: boolean;
   createdAt: string;
 }
@@ -211,6 +231,135 @@ export interface SponsorshipPayment {
   createdAt: string;
 }
 
+export interface DatingPackage {
+  id: number;
+  slug: string;
+  name: string;
+  priceUsd: number;
+  minSelections: number;
+  maxSelections: number | null;
+  durationDays: number | null;
+  isUnlimited: boolean;
+  description: string;
+  isActive: boolean;
+}
+
+export interface DatingProfilePublic {
+  id: number;
+  displayName: string;
+  age: number;
+  gender: 'male' | 'female';
+  country: string;
+  city: string;
+  suburb: string;
+  photo: string;
+  childrenCount: number | null;
+  description: string;
+  intention: 'dating' | 'serious_relationship' | 'marriage';
+  isVerified: boolean;
+  alreadyChosen: boolean;
+  hivShared: boolean;
+  hivStatus?: string;
+  createdAt: string;
+}
+
+export interface DatingProfilePrivate {
+  id: number;
+  userId: number;
+  displayName: string;
+  age: number;
+  gender: 'male' | 'female';
+  country: string;
+  city: string;
+  suburb: string;
+  whatsapp: string;
+  photo: string;
+  childrenCount: number | null;
+  hivStatus: string;
+  shareHivWithSubscribers: boolean;
+  description: string;
+  intention: 'dating' | 'serious_relationship' | 'marriage';
+  termsAccepted: boolean;
+  approvalStatus: 'pending' | 'approved' | 'rejected';
+  moderationReason: string | null;
+  isVisible: boolean;
+  isSuspended: boolean;
+  createdAt: string;
+  updatedAt: string;
+  userEmail?: string;
+  userFullName?: string;
+  verificationStatus?: string;
+  accountStatus?: string;
+}
+
+export interface DatingSubscription {
+  id: number;
+  userId: number;
+  packageId: number;
+  packageName: string;
+  amountUsd: number;
+  selectionLimit: number | null;
+  selectionsUsed: number;
+  remainingSelections: number | null;
+  isUnlimited: boolean;
+  status: 'active' | 'exhausted' | 'expired' | 'refunded';
+  startsAt: string;
+  expiresAt: string | null;
+  createdAt: string;
+  userName?: string;
+  userEmail?: string;
+}
+
+export interface DatingSelectionItem {
+  id: number;
+  createdAt: string;
+  profileId: number;
+  displayName: string;
+  age: number;
+  gender: string;
+  country: string;
+  city: string;
+  suburb: string;
+  photo: string;
+  intention: string;
+  whatsapp: string;
+  isVerified: boolean;
+}
+
+export interface PaymentCapabilities {
+  paynowConfigured: boolean;
+  paypalConfigured: boolean;
+  paypalMode?: 'sandbox' | 'live';
+  manualEnabled: boolean;
+}
+
+export interface PaymentTransaction {
+  id: number;
+  userId: number;
+  userName?: string;
+  userEmail?: string;
+  userPhone?: string;
+  featureType: 'dating_package' | 'sponsored_job' | 'sponsored_market' | 'sponsored_house';
+  targetId: number;
+  targetTitle: string;
+  planOrPackageId: number | null;
+  gateway: 'paynow' | 'paypal' | 'manual';
+  amountUsd: number;
+  currency: string;
+  status: 'pending' | 'paid' | 'failed' | 'refunded';
+  merchantReference: string;
+  gatewayReference: string | null;
+  gatewayCaptureId: string | null;
+  checkoutUrl: string | null;
+  metadataJson: Record<string, unknown>;
+  adminNote: string | null;
+  refundedAmountUsd: number | null;
+  refundReason: string | null;
+  paidAt: string | null;
+  refundedAt: string | null;
+  createdAt: string;
+}
+
 export interface PlatformMeta {
   categories: {
     job: string[];
@@ -218,6 +367,10 @@ export interface PlatformMeta {
     house: string[];
   };
   sponsorshipPlans: SponsorshipPlan[];
+  datingPackages?: DatingPackage[];
+  datingEnabled?: boolean;
+  datingAllowHivDisclosure?: boolean;
+  paymentCapabilities?: PaymentCapabilities;
   paymentInstructions: string;
 }
 

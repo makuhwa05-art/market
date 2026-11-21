@@ -1,0 +1,6 @@
+{
+  "name": "MARKET & JOBS",
+  "description": "Lightweight Zimbabwean platform for finding jobs, buying and selling goods and services, and renting houses or rooms via WhatsApp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
